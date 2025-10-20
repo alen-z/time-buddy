@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json
 import subprocess
 from datetime import datetime, timedelta, date, time
@@ -9,8 +10,22 @@ import colorama
 import sqlite3
 import os
 
+# --- Configuration ---
 EXPECTED_HOURS_PER_DAY = 7.5
-DB_FILE = 'time_buddy.db'
+
+def get_db_path():
+    """Returns the platform-specific path to the database file."""
+    app_name = "TimeBuddy"
+    # For macOS, use the Application Support directory
+    home = os.path.expanduser("~")
+    app_support_dir = os.path.join(home, "Library", "Application Support", app_name)
+    
+    if not os.path.exists(app_support_dir):
+        os.makedirs(app_support_dir)
+        
+    return os.path.join(app_support_dir, 'time_buddy.db')
+
+DB_FILE = get_db_path()
 
 
 # --- Database Functions ---
