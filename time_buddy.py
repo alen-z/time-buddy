@@ -1,6 +1,6 @@
 import json
 import subprocess
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time
 import argparse
 from collections import defaultdict
 from tzlocal import get_localzone
@@ -202,9 +202,13 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
         spinner.start()
 
     try:
-        for i in range(days_back):
-            current_day = today - timedelta(days=i)
-            
+        # We must process chronologically to handle sessions crossing midnight
+        dates_to_process = [today - timedelta(days=i) for i in range(days_back - 1, -1, -1)]
+
+        for current_day in dates_to_process:
+            if spinner:
+                spinner.text = f"Processing {current_day.isoformat()}..."
+
             logs = []
             is_cached = not no_cache and db_is_day_cached(conn, current_day)
             
@@ -265,27 +269,49 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
 
             hourly_durations, block_duration, last_unlock_time = process_day_logs(logs, current_day, verbose)
             
-            # If it's today and there's an open session, calculate time until now.
-            if current_day == today and last_unlock_time is not None:
-                now = datetime.now(local_tz)
-                if last_unlock_time.date() == today:
-                    duration = now - last_unlock_time
-                    if verbose:
-                        print(f"  - Active session: from {last_unlock_time.strftime('%H:%M:%S')} to now (Duration: {duration})")
+            # If the last event of the day was an unlock, it's an open session
+            if last_unlock_time is not None:
+                # If it's today, calculate up to now
+                if current_day == today:
+                    now = datetime.now(local_tz)
+                    if last_unlock_time.date() == today:
+                        duration = now - last_unlock_time
+                        if verbose:
+                            print(f"  - Active session: from {last_unlock_time.strftime('%H:%M:%S')} to now (Duration: {duration})")
 
+                        current_time = last_unlock_time
+                        while current_time < now:
+                            current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
+                            next_hour_start = current_hour_start + timedelta(hours=1)
+                            
+                            segment_end = min(now, next_hour_start)
+                            duration_in_hour = segment_end - current_time
+                            
+                            hourly_durations[current_time.hour] += duration_in_hour
+                            
+                            current_time = next_hour_start
+                        
+                        block_duration += now - last_unlock_time
+                # If it's a past day, calculate up to midnight
+                else:
+                    end_of_day = datetime.combine(current_day, time(23, 59, 59, 999999), tzinfo=last_unlock_time.tzinfo)
+                    duration = end_of_day - last_unlock_time
+                    if verbose:
+                        print(f"  - Session carried over to next day: from {last_unlock_time.strftime('%H:%M:%S')} to 23:59:59 (Duration: {duration})")
+                    
                     current_time = last_unlock_time
-                    while current_time < now:
+                    while current_time < end_of_day:
                         current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
                         next_hour_start = current_hour_start + timedelta(hours=1)
                         
-                        segment_end = min(now, next_hour_start)
+                        segment_end = min(end_of_day, next_hour_start)
                         duration_in_hour = segment_end - current_time
                         
                         hourly_durations[current_time.hour] += duration_in_hour
                         
                         current_time = next_hour_start
                     
-                    block_duration += now - last_unlock_time
+                    block_duration += end_of_day - last_unlock_time
 
             if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
                 daily_hourly_durations[current_day] = hourly_durations
