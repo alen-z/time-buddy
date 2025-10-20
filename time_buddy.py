@@ -205,6 +205,10 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
         # We must process chronologically to handle sessions crossing midnight
         dates_to_process = [today - timedelta(days=i) for i in range(days_back - 1, -1, -1)]
 
+        # Track whether the previous processed day ended unlocked (carry-over)
+        carry_over_unlocked = False
+        carry_over_tzinfo = None
+
         for current_day in dates_to_process:
             if spinner:
                 spinner.text = f"Processing {current_day.isoformat()}..."
@@ -267,6 +271,16 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
             if not logs:
                 continue
 
+            # Inject a synthetic unlocked event at 00:00 only if previous day carried over unlocked
+            if carry_over_unlocked:
+                start_of_day = datetime.combine(current_day, datetime.min.time())
+                tzinfo = carry_over_tzinfo or local_tz
+                start_of_day = start_of_day.replace(tzinfo=tzinfo)
+                logs.append({
+                    "timestamp": start_of_day.isoformat(),
+                    "eventMessage": "screenIsUnlocked (synthetic carryover)"
+                })
+
             hourly_durations, block_duration, last_unlock_time = process_day_logs(logs, current_day, verbose)
             
             # If the last event of the day was an unlock, it's an open session
@@ -312,6 +326,14 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
                         current_time = next_hour_start
                     
                     block_duration += end_of_day - last_unlock_time
+
+            # Update carry-over state for the next day
+            if last_unlock_time is not None:
+                carry_over_unlocked = True
+                carry_over_tzinfo = last_unlock_time.tzinfo
+            else:
+                carry_over_unlocked = False
+                carry_over_tzinfo = None
 
             if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
                 daily_hourly_durations[current_day] = hourly_durations
