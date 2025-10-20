@@ -38,6 +38,68 @@ def print_hourly_breakdown(day: date, hourly_durations: defaultdict):
     print(output_line)
 
 
+def process_day_logs(logs, current_day, verbose=False):
+    """Processes log entries for a single day and returns hourly durations."""
+    events = []
+    for entry in logs:
+        timestamp_str = entry.get("timestamp")
+        if not timestamp_str:
+            continue
+        
+        try:
+            timestamp = datetime.fromisoformat(timestamp_str)
+        except ValueError:
+            try:
+                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
+            except ValueError:
+                continue
+        
+        # Ensure the event belongs to the current day being processed
+        if timestamp.date() != current_day:
+            continue
+        
+        message = entry.get("eventMessage", "")
+        
+        if "screenIsUnlocked" in message:
+            events.append({'timestamp': timestamp, 'type': 'unlocked'})
+        elif "screenIsLocked" in message:
+            events.append({'timestamp': timestamp, 'type': 'locked'})
+    
+    events.sort(key=lambda x: x['timestamp'])
+    
+    hourly_durations = defaultdict(timedelta)
+    unlock_time = None
+    if verbose:
+        print(f"Processing sessions for {current_day.isoformat()}:")
+
+    for event in events:
+        if event['type'] == 'unlocked':
+            if unlock_time is None:
+                unlock_time = event['timestamp']
+        elif event['type'] == 'locked':
+            if unlock_time is not None:
+                lock_time = event['timestamp']
+                duration = lock_time - unlock_time
+                if verbose:
+                    print(f"  - Session from {unlock_time.strftime('%Y-%m-%d %H:%M:%S')} to {lock_time.strftime('%Y-%m-%d %H:%M:%S')} (Duration: {duration})")
+
+                current_time = unlock_time
+                while current_time < lock_time:
+                    current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
+                    next_hour_start = current_hour_start + timedelta(hours=1)
+                    
+                    segment_end = min(lock_time, next_hour_start)
+                    duration_in_hour = segment_end - current_time
+                    
+                    hourly_durations[current_time.hour] += duration_in_hour
+                    
+                    current_time = next_hour_start
+                    
+                unlock_time = None
+    
+    return hourly_durations
+
+
 def get_screen_time(days_back, verbose=False):
     """
     Calculates screen time for the last N days, fetching logs day by day.
@@ -76,58 +138,7 @@ def get_screen_time(days_back, verbose=False):
                 if not logs:
                     continue
 
-                events = []
-                for entry in logs:
-                    timestamp_str = entry.get("timestamp")
-                    if not timestamp_str:
-                        continue
-                    
-                    try:
-                        timestamp = datetime.fromisoformat(timestamp_str)
-                    except ValueError:
-                        try:
-                            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
-                        except ValueError:
-                            continue
-                    
-                    message = entry.get("eventMessage", "")
-                    
-                    if "screenIsUnlocked" in message:
-                        events.append({'timestamp': timestamp, 'type': 'unlocked'})
-                    elif "screenIsLocked" in message:
-                        events.append({'timestamp': timestamp, 'type': 'locked'})
-                
-                events.sort(key=lambda x: x['timestamp'])
-                
-                hourly_durations = defaultdict(timedelta)
-                unlock_time = None
-                if verbose:
-                    print(f"Processing sessions for {current_day.isoformat()}:")
-
-                for event in events:
-                    if event['type'] == 'unlocked':
-                        if unlock_time is None:
-                            unlock_time = event['timestamp']
-                    elif event['type'] == 'locked':
-                        if unlock_time is not None:
-                            lock_time = event['timestamp']
-                            duration = lock_time - unlock_time
-                            if verbose:
-                                print(f"  - Session from {unlock_time.strftime('%Y-%m-%d %H:%M:%S')} to {lock_time.strftime('%Y-%m-%d %H:%M:%S')} (Duration: {duration})")
-
-                            current_time = unlock_time
-                            while current_time < lock_time:
-                                current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
-                                next_hour_start = current_hour_start + timedelta(hours=1)
-                                
-                                segment_end = min(lock_time, next_hour_start)
-                                duration_in_hour = segment_end - current_time
-                                
-                                hourly_durations[current_time.hour] += duration_in_hour
-                                
-                                current_time = next_hour_start
-                                
-                            unlock_time = None
+                hourly_durations = process_day_logs(logs, current_day, verbose)
                 
                 if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
                     daily_hourly_durations[current_day] = hourly_durations
