@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, date
 import argparse
 from collections import defaultdict
 from tzlocal import get_localzone
+from halo import Halo
+import colorama
 
 EXPECTED_HOURS_PER_DAY = 7.5
 
@@ -110,9 +112,18 @@ def get_screen_time(days_back, verbose=False):
     days_with_activity = set()
     local_tz = get_localzone()
 
+    spinner = None
+    if not verbose:
+        spinner = Halo(text='Initializing...', spinner='dots')
+        spinner.start()
+
     try:
         for i in range(days_back):
             current_day = today - timedelta(days=i)
+            
+            if spinner:
+                spinner.text = f"Fetching logs for {current_day.isoformat()}..."
+
             start_of_day = datetime.combine(current_day, datetime.min.time())
             end_of_day = datetime.combine(current_day, datetime.max.time())
             start_of_day_aware = start_of_day.replace(tzinfo=local_tz)
@@ -151,14 +162,27 @@ def get_screen_time(days_back, verbose=False):
                 if e.returncode == 1 and not e.stdout and not e.stderr:
                     pass  # No logs found, continue silently
                 else:
+                    if spinner:
+                        spinner.fail(f"Error executing log command for {current_day.isoformat()}")
                     print(f"Error executing log command for {current_day.isoformat()}: {e}")
             except json.JSONDecodeError:
+                if spinner:
+                    spinner.fail(f"Error decoding JSON from log output for {current_day.isoformat()}")
                 print(f"Error decoding JSON from log output for {current_day.isoformat()}.")
             except Exception as e:
+                if spinner:
+                    spinner.fail(f"An unexpected error occurred for {current_day.isoformat()}")
                 print(f"An unexpected error occurred for {current_day.isoformat()}: {e}")
     
     except KeyboardInterrupt:
+        if spinner:
+            spinner.warn("Process interrupted by user.")
         print("\n\nProcess interrupted by user. Displaying summary for data collected so far...")
+
+    if spinner:
+        spinner.succeed("Log processing complete.")
+        spinner.stop()
+        colorama.reinit()
 
     # --- Print Summaries ---
     print("\n--- Daily Screen Time Summary ---")
