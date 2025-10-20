@@ -179,8 +179,7 @@ def process_day_logs(logs, current_day, verbose=False):
         last_event_in_block = max([e['timestamp'] for e in events if e['timestamp'].hour == last_block_end_hour])
         total_block_duration += last_event_in_block - first_event_in_block
 
-    # If the loop finishes and unlock_time is still set, it's an open session
-    return hourly_durations, unlock_time, total_block_duration
+    return hourly_durations, total_block_duration, unlock_time
 
 
 def get_screen_time(days_back, verbose=False, no_cache=False):
@@ -264,25 +263,28 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
             if not logs:
                 continue
 
-            hourly_durations, last_unlock_time, block_duration = process_day_logs(logs, current_day, verbose)
+            hourly_durations, block_duration, last_unlock_time = process_day_logs(logs, current_day, verbose)
             
             # If it's today and there's an open session, calculate time until now.
             if current_day == today and last_unlock_time is not None:
                 now = datetime.now(local_tz)
-                current_time = last_unlock_time
-                while current_time < now:
-                    current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
-                    next_hour_start = current_hour_start + timedelta(hours=1)
+                if last_unlock_time.date() == today:
+                    duration = now - last_unlock_time
+                    if verbose:
+                        print(f"  - Active session: from {last_unlock_time.strftime('%H:%M:%S')} to now (Duration: {duration})")
+
+                    current_time = last_unlock_time
+                    while current_time < now:
+                        current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
+                        next_hour_start = current_hour_start + timedelta(hours=1)
+                        
+                        segment_end = min(now, next_hour_start)
+                        duration_in_hour = segment_end - current_time
+                        
+                        hourly_durations[current_time.hour] += duration_in_hour
+                        
+                        current_time = next_hour_start
                     
-                    segment_end = min(now, next_hour_start)
-                    duration_in_hour = segment_end - current_time
-                    
-                    hourly_durations[current_time.hour] += duration_in_hour
-                    
-                    current_time = next_hour_start
-                
-                # If the open session was still active at the end of the day, add it to the block duration
-                if last_unlock_time.date() == current_day and last_unlock_time.hour < now.hour:
                     block_duration += now - last_unlock_time
 
             if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
