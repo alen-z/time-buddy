@@ -48,103 +48,108 @@ def get_screen_time(days_back, verbose=False):
     days_with_activity = set()
     local_tz = get_localzone()
 
-    for i in range(days_back):
-        current_day = today - timedelta(days=i)
-        start_of_day = datetime.combine(current_day, datetime.min.time())
-        end_of_day = datetime.combine(current_day, datetime.max.time())
-        start_of_day_aware = start_of_day.replace(tzinfo=local_tz)
-        end_of_day_aware = end_of_day.replace(tzinfo=local_tz)
+    try:
+        for i in range(days_back):
+            current_day = today - timedelta(days=i)
+            start_of_day = datetime.combine(current_day, datetime.min.time())
+            end_of_day = datetime.combine(current_day, datetime.max.time())
+            start_of_day_aware = start_of_day.replace(tzinfo=local_tz)
+            end_of_day_aware = end_of_day.replace(tzinfo=local_tz)
 
-        if verbose:
-            print(f"\nFetching logs for {current_day.isoformat()}...")
-
-        predicate = 'process == "loginwindow" and eventMessage contains "com.apple.sessionagent.screenIs"'
-        command = [
-            'log', 'show', '--style', 'json',
-            '--predicate', predicate,
-            '--start', start_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z'),
-            '--end', end_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z')
-        ]
-
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, check=True)
-            logs = json.loads(result.stdout)
             if verbose:
-                print(f"Found {len(logs)} log entries.")
+                print(f"\nFetching logs for {current_day.isoformat()}...")
 
-            if not logs:
-                continue
+            predicate = 'process == "loginwindow" and eventMessage contains "com.apple.sessionagent.screenIs"'
+            command = [
+                'log', 'show', '--style', 'json',
+                '--predicate', predicate,
+                '--start', start_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z'),
+                '--end', end_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z')
+            ]
 
-            events = []
-            for entry in logs:
-                timestamp_str = entry.get("timestamp")
-                if not timestamp_str:
-                    continue
-                
-                try:
-                    timestamp = datetime.fromisoformat(timestamp_str)
-                except ValueError:
-                    try:
-                        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
-                    except ValueError:
-                        continue
-                
-                message = entry.get("eventMessage", "")
-                
-                if "screenIsUnlocked" in message:
-                    events.append({'timestamp': timestamp, 'type': 'unlocked'})
-                elif "screenIsLocked" in message:
-                    events.append({'timestamp': timestamp, 'type': 'locked'})
-            
-            events.sort(key=lambda x: x['timestamp'])
-            
-            hourly_durations = defaultdict(timedelta)
-            unlock_time = None
-            if verbose:
-                print(f"Processing sessions for {current_day.isoformat()}:")
-
-            for event in events:
-                if event['type'] == 'unlocked':
-                    if unlock_time is None:
-                        unlock_time = event['timestamp']
-                elif event['type'] == 'locked':
-                    if unlock_time is not None:
-                        lock_time = event['timestamp']
-                        duration = lock_time - unlock_time
-                        if verbose:
-                            print(f"  - Session from {unlock_time.strftime('%Y-%m-%d %H:%M:%S')} to {lock_time.strftime('%Y-%m-%d %H:%M:%S')} (Duration: {duration})")
-
-                        current_time = unlock_time
-                        while current_time < lock_time:
-                            current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
-                            next_hour_start = current_hour_start + timedelta(hours=1)
-                            
-                            segment_end = min(lock_time, next_hour_start)
-                            duration_in_hour = segment_end - current_time
-                            
-                            hourly_durations[current_time.hour] += duration_in_hour
-                            
-                            current_time = next_hour_start
-                            
-                        unlock_time = None
-            
-            if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
-                daily_hourly_durations[current_day] = hourly_durations
-                days_with_activity.add(current_day)
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, check=True)
+                logs = json.loads(result.stdout)
                 if verbose:
-                    total_day_hours = sum(hourly_durations.values(), timedelta()).total_seconds() / 3600
-                    print(f"Calculated {total_day_hours:.1f} hours of screen time.")
+                    print(f"Found {len(logs)} log entries.")
 
-        except subprocess.CalledProcessError as e:
-            if e.returncode == 1 and not e.stdout and not e.stderr:
-                pass  # No logs found, continue silently
-            else:
-                print(f"Error executing log command for {current_day.isoformat()}: {e}")
-        except json.JSONDecodeError:
-            print(f"Error decoding JSON from log output for {current_day.isoformat()}.")
-        except Exception as e:
-            print(f"An unexpected error occurred for {current_day.isoformat()}: {e}")
+                if not logs:
+                    continue
 
+                events = []
+                for entry in logs:
+                    timestamp_str = entry.get("timestamp")
+                    if not timestamp_str:
+                        continue
+                    
+                    try:
+                        timestamp = datetime.fromisoformat(timestamp_str)
+                    except ValueError:
+                        try:
+                            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
+                        except ValueError:
+                            continue
+                    
+                    message = entry.get("eventMessage", "")
+                    
+                    if "screenIsUnlocked" in message:
+                        events.append({'timestamp': timestamp, 'type': 'unlocked'})
+                    elif "screenIsLocked" in message:
+                        events.append({'timestamp': timestamp, 'type': 'locked'})
+                
+                events.sort(key=lambda x: x['timestamp'])
+                
+                hourly_durations = defaultdict(timedelta)
+                unlock_time = None
+                if verbose:
+                    print(f"Processing sessions for {current_day.isoformat()}:")
+
+                for event in events:
+                    if event['type'] == 'unlocked':
+                        if unlock_time is None:
+                            unlock_time = event['timestamp']
+                    elif event['type'] == 'locked':
+                        if unlock_time is not None:
+                            lock_time = event['timestamp']
+                            duration = lock_time - unlock_time
+                            if verbose:
+                                print(f"  - Session from {unlock_time.strftime('%Y-%m-%d %H:%M:%S')} to {lock_time.strftime('%Y-%m-%d %H:%M:%S')} (Duration: {duration})")
+
+                            current_time = unlock_time
+                            while current_time < lock_time:
+                                current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
+                                next_hour_start = current_hour_start + timedelta(hours=1)
+                                
+                                segment_end = min(lock_time, next_hour_start)
+                                duration_in_hour = segment_end - current_time
+                                
+                                hourly_durations[current_time.hour] += duration_in_hour
+                                
+                                current_time = next_hour_start
+                                
+                            unlock_time = None
+                
+                if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
+                    daily_hourly_durations[current_day] = hourly_durations
+                    days_with_activity.add(current_day)
+                    if verbose:
+                        total_day_hours = sum(hourly_durations.values(), timedelta()).total_seconds() / 3600
+                        print(f"Calculated {total_day_hours:.1f} hours of screen time.")
+
+            except subprocess.CalledProcessError as e:
+                if e.returncode == 1 and not e.stdout and not e.stderr:
+                    pass  # No logs found, continue silently
+                else:
+                    print(f"Error executing log command for {current_day.isoformat()}: {e}")
+            except json.JSONDecodeError:
+                print(f"Error decoding JSON from log output for {current_day.isoformat()}.")
+            except Exception as e:
+                print(f"An unexpected error occurred for {current_day.isoformat()}: {e}")
+    
+    except KeyboardInterrupt:
+        print("\n\nProcess interrupted by user. Displaying summary for data collected so far...")
+
+    # --- Print Summaries ---
     print("\n--- Daily Screen Time Summary ---")
     if not daily_hourly_durations:
         print("No screen time data found for the selected period.")
