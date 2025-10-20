@@ -59,14 +59,16 @@ def db_mark_day_as_cached(conn, day):
         conn.execute("INSERT OR IGNORE INTO fetched_days (day) VALUES (?)", (day.isoformat(),))
 
 
-def print_hourly_breakdown(day: date, hourly_durations: defaultdict):
+def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_duration: timedelta):
     """Prints a single line of 24 colored blocks representing a day's screen time."""
     # --- Color gradient (10 steps from red to green in ANSI 256-color) ---
     gradient_colors = [196, 202, 208, 214, 220, 226, 190, 154, 118, 46]
     
     total_duration = sum(hourly_durations.values(), timedelta())
     total_hours = total_duration.total_seconds() / 3600
-    percentage = (total_hours / EXPECTED_HOURS_PER_DAY) * 100
+    total_block_hours = block_duration.total_seconds() / 3600
+    raw_percentage = (total_hours / EXPECTED_HOURS_PER_DAY) * 100
+    block_percentage = (total_block_hours / EXPECTED_HOURS_PER_DAY) * 100
 
     output_line = f"{day.isoformat()}: "
 
@@ -85,12 +87,14 @@ def print_hourly_breakdown(day: date, hourly_durations: defaultdict):
 
         output_line += f"{color_code}█\033[0m"
     
-    output_line += f"  {total_hours:.1f} hours ({percentage:.0f}%)"
+    raw_str = f"Raw: {total_hours:.1f} h ({raw_percentage:.0f}%)"
+    block_str = f"Block: {total_block_hours:.1f} h ({block_percentage:.0f}%)"
+    output_line += f"  {raw_str:<22}{block_str}"
     print(output_line)
 
 
 def process_day_logs(logs, current_day, verbose=False):
-    """Processes log entries for a single day and returns hourly durations."""
+    """Processes log entries for a single day and returns hourly durations and block duration."""
     events = []
     for entry in logs:
         timestamp_str = entry.get("timestamp")
@@ -118,6 +122,7 @@ def process_day_logs(logs, current_day, verbose=False):
     
     events.sort(key=lambda x: x['timestamp'])
     
+    # --- Calculate precise screen time (sum of unlock-to-lock sessions) ---
     hourly_durations = defaultdict(timedelta)
     unlock_time = None
     if verbose:
@@ -148,7 +153,34 @@ def process_day_logs(logs, current_day, verbose=False):
                     
                 unlock_time = None
     
-    return hourly_durations
+    # --- Calculate Block Time (total span of continuous activity) ---
+    total_block_duration = timedelta()
+    active_hours = sorted([h for h, d in hourly_durations.items() if d.total_seconds() > 0])
+    
+    if active_hours:
+        current_block_start_hour = active_hours[0]
+        for i in range(1, len(active_hours)):
+            # If there's a gap of more than an hour, the block is broken
+            if active_hours[i] > active_hours[i-1] + 1:
+                # Process the completed block
+                block_end_hour = active_hours[i-1]
+                
+                first_event_in_block = min([e['timestamp'] for e in events if e['timestamp'].hour == current_block_start_hour])
+                last_event_in_block = max([e['timestamp'] for e in events if e['timestamp'].hour == block_end_hour])
+                
+                total_block_duration += last_event_in_block - first_event_in_block
+                
+                # Start a new block
+                current_block_start_hour = active_hours[i]
+        
+        # Process the final block
+        last_block_end_hour = active_hours[-1]
+        first_event_in_block = min([e['timestamp'] for e in events if e['timestamp'].hour == current_block_start_hour])
+        last_event_in_block = max([e['timestamp'] for e in events if e['timestamp'].hour == last_block_end_hour])
+        total_block_duration += last_event_in_block - first_event_in_block
+
+    # If the loop finishes and unlock_time is still set, it's an open session
+    return hourly_durations, unlock_time, total_block_duration
 
 
 def get_screen_time(days_back, verbose=False, no_cache=False):
@@ -159,6 +191,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
     db_init(conn)
 
     daily_hourly_durations = {}
+    daily_block_durations = {}
     today = datetime.now().date()
     total_actual_hours = 0
     days_with_activity = set()
@@ -231,10 +264,30 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
             if not logs:
                 continue
 
-            hourly_durations = process_day_logs(logs, current_day, verbose)
+            hourly_durations, last_unlock_time, block_duration = process_day_logs(logs, current_day, verbose)
             
+            # If it's today and there's an open session, calculate time until now.
+            if current_day == today and last_unlock_time is not None:
+                now = datetime.now(local_tz)
+                current_time = last_unlock_time
+                while current_time < now:
+                    current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
+                    next_hour_start = current_hour_start + timedelta(hours=1)
+                    
+                    segment_end = min(now, next_hour_start)
+                    duration_in_hour = segment_end - current_time
+                    
+                    hourly_durations[current_time.hour] += duration_in_hour
+                    
+                    current_time = next_hour_start
+                
+                # If the open session was still active at the end of the day, add it to the block duration
+                if last_unlock_time.date() == current_day and last_unlock_time.hour < now.hour:
+                    block_duration += now - last_unlock_time
+
             if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
                 daily_hourly_durations[current_day] = hourly_durations
+                daily_block_durations[current_day] = block_duration
                 days_with_activity.add(current_day)
                 if verbose:
                     total_day_hours = sum(hourly_durations.values(), timedelta()).total_seconds() / 3600
@@ -261,18 +314,24 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
 
     sorted_days = sorted(daily_hourly_durations.keys())
     for day in sorted_days:
-        print_hourly_breakdown(day, daily_hourly_durations[day])
+        print_hourly_breakdown(day, daily_hourly_durations[day], daily_block_durations[day])
 
     # --- Monthly Summary ---
     print("\n--- Monthly Summary ---")
     for day_data in daily_hourly_durations.values():
         total_actual_hours += sum(day_data.values(), timedelta()).total_seconds() / 3600
     
+    total_block_hours = sum([d.total_seconds() for d in daily_block_durations.values()]) / 3600
     total_expected_hours = len(days_with_activity) * EXPECTED_HOURS_PER_DAY
     
     if total_expected_hours > 0:
-        monthly_percentage = (total_actual_hours / total_expected_hours) * 100
-        print(f"Total for {len(days_with_activity)} active day(s): {total_actual_hours:.1f} / {total_expected_hours:.1f} hours ({monthly_percentage:.0f}%)")
+        monthly_raw_percentage = (total_actual_hours / total_expected_hours) * 100
+        monthly_block_percentage = (total_block_hours / total_expected_hours) * 100
+        
+        raw_str = f"Raw: {total_actual_hours:.1f} h ({monthly_raw_percentage:.0f}%)"
+        block_str = f"Block: {total_block_hours:.1f} h ({monthly_block_percentage:.0f}%)"
+        
+        print(f"Total for {len(days_with_activity)} active day(s): {raw_str:<22}{block_str}")
     else:
         print("No activity to summarize.")
 
