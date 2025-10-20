@@ -6,8 +6,57 @@ from collections import defaultdict
 from tzlocal import get_localzone
 from halo import Halo
 import colorama
+import sqlite3
+import os
 
 EXPECTED_HOURS_PER_DAY = 7.5
+DB_FILE = 'time_buddy.db'
+
+
+# --- Database Functions ---
+def db_connect():
+    """Connects to the SQLite database."""
+    return sqlite3.connect(DB_FILE)
+
+def db_init(conn):
+    """Initializes the database schema."""
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS raw_logs (
+                day TEXT,
+                timestamp TEXT,
+                data TEXT,
+                UNIQUE(day, timestamp, data)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fetched_days (
+                day TEXT PRIMARY KEY
+            )
+        """)
+
+def db_is_day_cached(conn, day):
+    """Checks if a past day has been fully cached."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM fetched_days WHERE day = ?", (day.isoformat(),))
+    return cursor.fetchone() is not None
+
+def db_get_logs_for_day(conn, day):
+    """Retrieves all log entries for a given day from the cache."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT data FROM raw_logs WHERE day = ?", (day.isoformat(),))
+    return [json.loads(row[0]) for row in cursor.fetchall()]
+
+def db_cache_logs(conn, day, logs):
+    """Caches a list of log entries for a given day."""
+    log_data = [(day.isoformat(), entry.get("timestamp"), json.dumps(entry)) for entry in logs]
+    with conn:
+        conn.executemany("INSERT OR IGNORE INTO raw_logs (day, timestamp, data) VALUES (?, ?, ?)", log_data)
+
+def db_mark_day_as_cached(conn, day):
+    """Marks a day as fully fetched in the database."""
+    with conn:
+        conn.execute("INSERT OR IGNORE INTO fetched_days (day) VALUES (?)", (day.isoformat(),))
 
 
 def print_hourly_breakdown(day: date, hourly_durations: defaultdict):
@@ -102,10 +151,13 @@ def process_day_logs(logs, current_day, verbose=False):
     return hourly_durations
 
 
-def get_screen_time(days_back, verbose=False):
+def get_screen_time(days_back, verbose=False, no_cache=False):
     """
     Calculates screen time for the last N days, fetching logs day by day.
     """
+    conn = db_connect()
+    db_init(conn)
+
     daily_hourly_durations = {}
     today = datetime.now().date()
     total_actual_hours = 0
@@ -121,63 +173,80 @@ def get_screen_time(days_back, verbose=False):
         for i in range(days_back):
             current_day = today - timedelta(days=i)
             
-            if spinner:
-                spinner.text = f"Fetching logs for {current_day.isoformat()}..."
-
-            start_of_day = datetime.combine(current_day, datetime.min.time())
-            end_of_day = datetime.combine(current_day, datetime.max.time())
-            start_of_day_aware = start_of_day.replace(tzinfo=local_tz)
-            end_of_day_aware = end_of_day.replace(tzinfo=local_tz)
-
-            if verbose:
-                print(f"\nFetching logs for {current_day.isoformat()}...")
-
-            predicate = 'process == "loginwindow" and eventMessage contains "com.apple.sessionagent.screenIs"'
-            command = [
-                'log', 'show', '--style', 'json',
-                '--predicate', predicate,
-                '--start', start_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z'),
-                '--end', end_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z')
-            ]
-
-            try:
-                result = subprocess.run(command, capture_output=True, text=True, check=True)
-                logs = json.loads(result.stdout)
+            logs = []
+            is_cached = not no_cache and db_is_day_cached(conn, current_day)
+            
+            # Past days can be loaded from cache. Today is always fetched fresh.
+            if is_cached and current_day != today:
+                if spinner:
+                    spinner.text = f"Loading logs from cache for {current_day.isoformat()}..."
+                logs = db_get_logs_for_day(conn, current_day)
                 if verbose:
-                    print(f"Found {len(logs)} log entries.")
-
-                if not logs:
-                    continue
-
-                hourly_durations = process_day_logs(logs, current_day, verbose)
+                    print(f"\nLoaded {len(logs)} log entries from cache for {current_day.isoformat()}.")
+            else:
+                if spinner:
+                    spinner.text = f"Fetching logs for {current_day.isoformat()}..."
                 
-                if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
-                    daily_hourly_durations[current_day] = hourly_durations
-                    days_with_activity.add(current_day)
-                    if verbose:
-                        total_day_hours = sum(hourly_durations.values(), timedelta()).total_seconds() / 3600
-                        print(f"Calculated {total_day_hours:.1f} hours of screen time.")
+                start_of_day = datetime.combine(current_day, datetime.min.time())
+                end_of_day = datetime.combine(current_day, datetime.max.time())
+                start_of_day_aware = start_of_day.replace(tzinfo=local_tz)
+                end_of_day_aware = end_of_day.replace(tzinfo=local_tz)
 
-            except subprocess.CalledProcessError as e:
-                if e.returncode == 1 and not e.stdout and not e.stderr:
-                    pass  # No logs found, continue silently
-                else:
+                if verbose:
+                    print(f"\nFetching logs for {current_day.isoformat()}...")
+
+                predicate = 'process == "loginwindow" and eventMessage contains "com.apple.sessionagent.screenIs"'
+                command = [
+                    'log', 'show', '--style', 'json',
+                    '--predicate', predicate,
+                    '--start', start_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z'),
+                    '--end', end_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z')
+                ]
+
+                try:
+                    result = subprocess.run(command, capture_output=True, text=True, check=True)
+                    fetched_logs = json.loads(result.stdout)
+                    logs.extend(fetched_logs)
+                    
+                    if verbose:
+                        print(f"Found {len(logs)} log entries.")
+
+                    # Cache the newly fetched logs
+                    db_cache_logs(conn, current_day, logs)
+                    if current_day != today:
+                        db_mark_day_as_cached(conn, current_day)
+
+                except subprocess.CalledProcessError as e:
+                    if e.returncode == 1 and not e.stdout and not e.stderr:
+                        pass  # No logs found
+                    else:
+                        if spinner:
+                            spinner.fail(f"Error executing log command for {current_day.isoformat()}")
+                        print(f"Error executing log command for {current_day.isoformat()}: {e}")
+                except json.JSONDecodeError:
                     if spinner:
-                        spinner.fail(f"Error executing log command for {current_day.isoformat()}")
-                    print(f"Error executing log command for {current_day.isoformat()}: {e}")
-            except json.JSONDecodeError:
-                if spinner:
-                    spinner.fail(f"Error decoding JSON from log output for {current_day.isoformat()}")
-                print(f"Error decoding JSON from log output for {current_day.isoformat()}.")
-            except Exception as e:
-                if spinner:
-                    spinner.fail(f"An unexpected error occurred for {current_day.isoformat()}")
-                print(f"An unexpected error occurred for {current_day.isoformat()}: {e}")
-    
+                        spinner.fail(f"Error decoding JSON from log output for {current_day.isoformat()}")
+                    print(f"Error decoding JSON from log output for {current_day.isoformat()}.")
+            
+            if not logs:
+                continue
+
+            hourly_durations = process_day_logs(logs, current_day, verbose)
+            
+            if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
+                daily_hourly_durations[current_day] = hourly_durations
+                days_with_activity.add(current_day)
+                if verbose:
+                    total_day_hours = sum(hourly_durations.values(), timedelta()).total_seconds() / 3600
+                    print(f"Calculated {total_day_hours:.1f} hours of screen time.")
+
     except KeyboardInterrupt:
         if spinner:
             spinner.warn("Process interrupted by user.")
         print("\n\nProcess interrupted by user. Displaying summary for data collected so far...")
+
+    finally:
+        conn.close()
 
     if spinner:
         spinner.succeed("Log processing complete.")
@@ -224,9 +293,27 @@ def main():
         action='store_true',
         help='Print detailed session information for validation.'
     )
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help='Force refetching of all logs, ignoring the cache.'
+    )
+    parser.add_argument(
+        '--clear-cache',
+        action='store_true',
+        help='Delete the cache file and exit.'
+    )
     args = parser.parse_args()
 
-    get_screen_time(args.days, args.verbose)
+    if args.clear_cache:
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
+            print(f"Cache file '{DB_FILE}' has been deleted.")
+        else:
+            print("No cache file to delete.")
+        return
+
+    get_screen_time(args.days, args.verbose, args.no_cache)
 
 
 if __name__ == "__main__":
