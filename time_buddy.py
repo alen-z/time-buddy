@@ -3,6 +3,7 @@ import subprocess
 from datetime import datetime, timedelta, date
 import argparse
 from collections import defaultdict
+from tzlocal import get_localzone
 
 EXPECTED_HOURS_PER_DAY = 7.5
 
@@ -37,7 +38,7 @@ def print_hourly_breakdown(day: date, hourly_durations: defaultdict):
     print(output_line)
 
 
-def get_screen_time(days_back):
+def get_screen_time(days_back, verbose=False):
     """
     Calculates screen time for the last N days, fetching logs day by day.
     """
@@ -45,24 +46,32 @@ def get_screen_time(days_back):
     today = datetime.now().date()
     total_actual_hours = 0
     days_with_activity = set()
+    local_tz = get_localzone()
 
     for i in range(days_back):
         current_day = today - timedelta(days=i)
         start_of_day = datetime.combine(current_day, datetime.min.time())
         end_of_day = datetime.combine(current_day, datetime.max.time())
-        
+        start_of_day_aware = start_of_day.replace(tzinfo=local_tz)
+        end_of_day_aware = end_of_day.replace(tzinfo=local_tz)
+
+        if verbose:
+            print(f"\nFetching logs for {current_day.isoformat()}...")
+
         predicate = 'process == "loginwindow" and eventMessage contains "com.apple.sessionagent.screenIs"'
         command = [
             'log', 'show', '--style', 'json',
             '--predicate', predicate,
-            '--start', start_of_day.strftime('%Y-%m-%d %H:%M:%S'),
-            '--end', end_of_day.strftime('%Y-%m-%d %H:%M:%S')
+            '--start', start_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z'),
+            '--end', end_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z')
         ]
 
         try:
             result = subprocess.run(command, capture_output=True, text=True, check=True)
             logs = json.loads(result.stdout)
-            
+            if verbose:
+                print(f"Found {len(logs)} log entries.")
+
             if not logs:
                 continue
 
@@ -91,6 +100,8 @@ def get_screen_time(days_back):
             
             hourly_durations = defaultdict(timedelta)
             unlock_time = None
+            if verbose:
+                print(f"Processing sessions for {current_day.isoformat()}:")
 
             for event in events:
                 if event['type'] == 'unlocked':
@@ -99,7 +110,10 @@ def get_screen_time(days_back):
                 elif event['type'] == 'locked':
                     if unlock_time is not None:
                         lock_time = event['timestamp']
-                        
+                        duration = lock_time - unlock_time
+                        if verbose:
+                            print(f"  - Session from {unlock_time.strftime('%Y-%m-%d %H:%M:%S')} to {lock_time.strftime('%Y-%m-%d %H:%M:%S')} (Duration: {duration})")
+
                         current_time = unlock_time
                         while current_time < lock_time:
                             current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
@@ -117,6 +131,9 @@ def get_screen_time(days_back):
             if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
                 daily_hourly_durations[current_day] = hourly_durations
                 days_with_activity.add(current_day)
+                if verbose:
+                    total_day_hours = sum(hourly_durations.values(), timedelta()).total_seconds() / 3600
+                    print(f"Calculated {total_day_hours:.1f} hours of screen time.")
 
         except subprocess.CalledProcessError as e:
             if e.returncode == 1 and not e.stdout and not e.stderr:
@@ -162,9 +179,14 @@ def main():
         default=7,
         help='Number of days back to calculate screen time for. (default: 7)'
     )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Print detailed session information for validation.'
+    )
     args = parser.parse_args()
 
-    get_screen_time(args.days)
+    get_screen_time(args.days, args.verbose)
 
 
 if __name__ == "__main__":
