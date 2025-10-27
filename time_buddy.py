@@ -284,6 +284,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
                     print(f"Error decoding JSON from log output for {current_day.isoformat()}.")
             
             if not logs:
+                carry_over_unlocked = False
                 continue
 
             # Inject a synthetic unlocked event at 00:00 only if previous day carried over unlocked
