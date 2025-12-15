@@ -399,7 +399,10 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
         total_actual_hours += sum(day_data.values(), timedelta()).total_seconds() / 3600
 
     total_block_hours = sum([d.total_seconds() for d in daily_block_durations.values()]) / 3600
-    total_expected_hours = len(days_with_activity) * EXPECTED_HOURS_PER_DAY
+
+    # Only count weekdays (Mon-Fri) towards expected hours
+    weekday_count = sum(1 for day in days_with_activity if day.weekday() < 5)
+    total_expected_hours = weekday_count * EXPECTED_HOURS_PER_DAY
 
     if total_expected_hours > 0:
         monthly_raw_percentage = (total_actual_hours / total_expected_hours) * 100
@@ -408,7 +411,13 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
         raw_str = f"Raw: {total_actual_hours:.1f} h ({monthly_raw_percentage:.0f}%)"
         block_str = f"Block: {total_block_hours:.1f} h ({monthly_block_percentage:.0f}%)"
 
-        print(f"Total for {len(days_with_activity)} active day(s): {raw_str:<22}{block_str}")
+        total_days = len(days_with_activity)
+        weekend_count = total_days - weekday_count
+        day_breakdown = f"{total_days} active day(s)"
+        if weekend_count > 0:
+            day_breakdown += f" ({weekday_count} weekdays, {weekend_count} weekend days)"
+
+        print(f"Total for {day_breakdown}: {raw_str:<22}{block_str}")
     else:
         print("No activity to summarize.")
 
