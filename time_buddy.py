@@ -19,10 +19,10 @@ def get_db_path():
     # For macOS, use the Application Support directory
     home = os.path.expanduser("~")
     app_support_dir = os.path.join(home, "Library", "Application Support", app_name)
-    
+
     if not os.path.exists(app_support_dir):
         os.makedirs(app_support_dir)
-        
+
     return os.path.join(app_support_dir, 'time_buddy.db')
 
 DB_FILE = get_db_path()
@@ -78,18 +78,29 @@ def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_durat
     """Prints a single line of 24 colored blocks representing a day's screen time."""
     # --- Color gradient (10 steps from red to green in ANSI 256-color) ---
     gradient_colors = [196, 202, 208, 214, 220, 226, 190, 154, 118, 46]
-    
+
     total_duration = sum(hourly_durations.values(), timedelta())
     total_hours = total_duration.total_seconds() / 3600
     total_block_hours = block_duration.total_seconds() / 3600
     raw_percentage = (total_hours / EXPECTED_HOURS_PER_DAY) * 100
     block_percentage = (total_block_hours / EXPECTED_HOURS_PER_DAY) * 100
 
-    output_line = f"{day.isoformat()}: "
+    # Determine day of week and apply appropriate color
+    day_of_week = day.weekday()  # Monday=0, Sunday=6
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    day_name = day_names[day_of_week]
+
+    # Use cyan for weekends, default color for weekdays
+    if day_of_week >= 5:  # Saturday or Sunday
+        day_label = f" \033[38;5;51m({day_name})\033[0m"
+    else:
+        day_label = f" ({day_name})"
+
+    output_line = f"{day.isoformat()}{day_label}: "
 
     for hour in range(24):
         minutes = hourly_durations.get(hour, timedelta()).total_seconds() / 60
-        
+
         color_code = ""
         if minutes > 0:
             # Map minutes (1-60) to a gradient index (0-9)
@@ -101,7 +112,7 @@ def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_durat
             color_code = '\033[38;5;240m'
 
         output_line += f"{color_code}█\033[0m"
-    
+
     raw_str = f"Raw: {total_hours:.1f} h ({raw_percentage:.0f}%)"
     block_str = f"Block: {total_block_hours:.1f} h ({block_percentage:.0f}%)"
     output_line += f"  {raw_str:<22}{block_str}"
@@ -115,7 +126,7 @@ def process_day_logs(logs, current_day, verbose=False):
         timestamp_str = entry.get("timestamp")
         if not timestamp_str:
             continue
-        
+
         try:
             timestamp = datetime.fromisoformat(timestamp_str)
         except ValueError:
@@ -123,20 +134,20 @@ def process_day_logs(logs, current_day, verbose=False):
                 timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
             except ValueError:
                 continue
-        
+
         # Ensure the event belongs to the current day being processed
         if timestamp.date() != current_day:
             continue
-        
+
         message = entry.get("eventMessage", "")
-        
+
         if "screenIsUnlocked" in message:
             events.append({'timestamp': timestamp, 'type': 'unlocked'})
         elif "screenIsLocked" in message:
             events.append({'timestamp': timestamp, 'type': 'locked'})
-    
+
     events.sort(key=lambda x: x['timestamp'])
-    
+
     # --- Calculate precise screen time (sum of unlock-to-lock sessions) ---
     hourly_durations = defaultdict(timedelta)
     unlock_time = None
@@ -158,20 +169,20 @@ def process_day_logs(logs, current_day, verbose=False):
                 while current_time < lock_time:
                     current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
                     next_hour_start = current_hour_start + timedelta(hours=1)
-                    
+
                     segment_end = min(lock_time, next_hour_start)
                     duration_in_hour = segment_end - current_time
-                    
+
                     hourly_durations[current_time.hour] += duration_in_hour
-                    
+
                     current_time = next_hour_start
-                    
+
                 unlock_time = None
-    
+
     # --- Calculate Block Time (total span of continuous activity) ---
     total_block_duration = timedelta()
     active_hours = sorted([h for h, d in hourly_durations.items() if d.total_seconds() > 0])
-    
+
     if active_hours:
         current_block_start_hour = active_hours[0]
         for i in range(1, len(active_hours)):
@@ -179,15 +190,15 @@ def process_day_logs(logs, current_day, verbose=False):
             if active_hours[i] > active_hours[i-1] + 1:
                 # Process the completed block
                 block_end_hour = active_hours[i-1]
-                
+
                 first_event_in_block = min([e['timestamp'] for e in events if e['timestamp'].hour == current_block_start_hour])
                 last_event_in_block = max([e['timestamp'] for e in events if e['timestamp'].hour == block_end_hour])
-                
+
                 total_block_duration += last_event_in_block - first_event_in_block
-                
+
                 # Start a new block
                 current_block_start_hour = active_hours[i]
-        
+
         # Process the final block
         last_block_end_hour = active_hours[-1]
         first_event_in_block = min([e['timestamp'] for e in events if e['timestamp'].hour == current_block_start_hour])
@@ -230,7 +241,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
 
             logs = []
             is_cached = not no_cache and db_is_day_cached(conn, current_day)
-            
+
             # Past days can be loaded from cache. Today is always fetched fresh.
             if is_cached and current_day != today:
                 if spinner:
@@ -241,7 +252,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
             else:
                 if spinner:
                     spinner.text = f"Fetching logs for {current_day.isoformat()}..."
-                
+
                 start_of_day = datetime.combine(current_day, datetime.min.time())
                 end_of_day = datetime.combine(current_day, datetime.max.time())
                 start_of_day_aware = start_of_day.replace(tzinfo=local_tz)
@@ -262,7 +273,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
                     result = subprocess.run(command, capture_output=True, text=True, check=True)
                     fetched_logs = json.loads(result.stdout)
                     logs.extend(fetched_logs)
-                    
+
                     if verbose:
                         print(f"Found {len(logs)} log entries.")
 
@@ -282,7 +293,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
                     if spinner:
                         spinner.fail(f"Error decoding JSON from log output for {current_day.isoformat()}")
                     print(f"Error decoding JSON from log output for {current_day.isoformat()}.")
-            
+
             if not logs:
                 carry_over_unlocked = False
                 continue
@@ -298,7 +309,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
                 })
 
             hourly_durations, block_duration, last_unlock_time = process_day_logs(logs, current_day, verbose)
-            
+
             # If the last event of the day was an unlock, it's an open session
             if last_unlock_time is not None:
                 # If it's today, calculate up to now
@@ -313,14 +324,14 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
                         while current_time < now:
                             current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
                             next_hour_start = current_hour_start + timedelta(hours=1)
-                            
+
                             segment_end = min(now, next_hour_start)
                             duration_in_hour = segment_end - current_time
-                            
+
                             hourly_durations[current_time.hour] += duration_in_hour
-                            
+
                             current_time = next_hour_start
-                        
+
                         block_duration += now - last_unlock_time
                 # If it's a past day, calculate up to midnight
                 else:
@@ -328,19 +339,19 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
                     duration = end_of_day - last_unlock_time
                     if verbose:
                         print(f"  - Session carried over to next day: from {last_unlock_time.strftime('%H:%M:%S')} to 23:59:59 (Duration: {duration})")
-                    
+
                     current_time = last_unlock_time
                     while current_time < end_of_day:
                         current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
                         next_hour_start = current_hour_start + timedelta(hours=1)
-                        
+
                         segment_end = min(end_of_day, next_hour_start)
                         duration_in_hour = segment_end - current_time
-                        
+
                         hourly_durations[current_time.hour] += duration_in_hour
-                        
+
                         current_time = next_hour_start
-                    
+
                     block_duration += end_of_day - last_unlock_time
 
             # Update carry-over state for the next day
@@ -386,17 +397,17 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
     print("\n--- Monthly Summary ---")
     for day_data in daily_hourly_durations.values():
         total_actual_hours += sum(day_data.values(), timedelta()).total_seconds() / 3600
-    
+
     total_block_hours = sum([d.total_seconds() for d in daily_block_durations.values()]) / 3600
     total_expected_hours = len(days_with_activity) * EXPECTED_HOURS_PER_DAY
-    
+
     if total_expected_hours > 0:
         monthly_raw_percentage = (total_actual_hours / total_expected_hours) * 100
         monthly_block_percentage = (total_block_hours / total_expected_hours) * 100
-        
+
         raw_str = f"Raw: {total_actual_hours:.1f} h ({monthly_raw_percentage:.0f}%)"
         block_str = f"Block: {total_block_hours:.1f} h ({monthly_block_percentage:.0f}%)"
-        
+
         print(f"Total for {len(days_with_activity)} active day(s): {raw_str:<22}{block_str}")
     else:
         print("No activity to summarize.")
