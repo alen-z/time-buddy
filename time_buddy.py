@@ -208,9 +208,15 @@ def process_day_logs(logs, current_day, verbose=False):
     return hourly_durations, total_block_duration, unlock_time
 
 
-def get_screen_time(days_back, verbose=False, no_cache=False):
+def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False):
     """
     Calculates screen time for the last N days, fetching logs day by day.
+
+    Args:
+        days_back: Number of days to look back
+        verbose: Print detailed session information
+        no_cache: Force refetching of all logs
+        include_weekends: Count weekends toward expected work hours (default: False)
     """
     conn = db_connect()
     db_init(conn)
@@ -400,9 +406,14 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
 
     total_block_hours = sum([d.total_seconds() for d in daily_block_durations.values()]) / 3600
 
-    # Only count weekdays (Mon-Fri) towards expected hours
-    weekday_count = sum(1 for day in days_with_activity if day.weekday() < 5)
-    total_expected_hours = weekday_count * EXPECTED_HOURS_PER_DAY
+    # Calculate expected hours based on include_weekends flag
+    if include_weekends:
+        # All active days count toward expected hours
+        total_expected_hours = len(days_with_activity) * EXPECTED_HOURS_PER_DAY
+    else:
+        # Only count weekdays (Mon-Fri) towards expected hours
+        weekday_count = sum(1 for day in days_with_activity if day.weekday() < 5)
+        total_expected_hours = weekday_count * EXPECTED_HOURS_PER_DAY
 
     if total_expected_hours > 0:
         monthly_raw_percentage = (total_actual_hours / total_expected_hours) * 100
@@ -412,10 +423,14 @@ def get_screen_time(days_back, verbose=False, no_cache=False):
         block_str = f"Block: {total_block_hours:.1f} h ({monthly_block_percentage:.0f}%)"
 
         total_days = len(days_with_activity)
-        weekend_count = total_days - weekday_count
-        day_breakdown = f"{total_days} active day(s)"
-        if weekend_count > 0:
-            day_breakdown += f" ({weekday_count} weekdays, {weekend_count} weekend days)"
+        if not include_weekends:
+            weekday_count = sum(1 for day in days_with_activity if day.weekday() < 5)
+            weekend_count = total_days - weekday_count
+            day_breakdown = f"{total_days} active day(s)"
+            if weekend_count > 0:
+                day_breakdown += f" ({weekday_count} weekdays, {weekend_count} weekend days)"
+        else:
+            day_breakdown = f"{total_days} active day(s)"
 
         print(f"Total for {day_breakdown}: {raw_str:<22}{block_str}")
     else:
@@ -448,6 +463,11 @@ def main():
         action='store_true',
         help='Delete the cache file and exit.'
     )
+    parser.add_argument(
+        '--include-weekends',
+        action='store_true',
+        help='Include weekends in expected work hours calculation. (default: False)'
+    )
     args = parser.parse_args()
 
     if args.clear_cache:
@@ -458,7 +478,7 @@ def main():
             print("No cache file to delete.")
         return
 
-    get_screen_time(args.days, args.verbose, args.no_cache)
+    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends)
 
 
 if __name__ == "__main__":
