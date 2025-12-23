@@ -9,6 +9,14 @@ from halo import Halo
 import colorama
 import sqlite3
 import os
+from importlib.metadata import version, PackageNotFoundError
+
+def get_version():
+    """Returns the package version."""
+    try:
+        return version("time-buddy")
+    except PackageNotFoundError:
+        return "0.1.0"  # Fallback for development
 
 # --- Configuration ---
 EXPECTED_HOURS_PER_DAY = 7.5
@@ -442,6 +450,11 @@ def main():
     Main function to run the CLI.
     """
     parser = argparse.ArgumentParser(description="A simple to use time tracking CLI for macOS.")
+    parser.add_argument(
+        '-V', '--version',
+        action='version',
+        version=f'time-buddy {get_version()}'
+    )
     parser.add_argument(
         '--days',
         type=int,

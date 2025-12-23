@@ -56,14 +56,14 @@ run:
 	python time_buddy.py --days 7
 
 # Test the binary
-test-binary: create-binary
+test-binary: install create-binary
 	@echo "Testing binary..."
 	./dist/time-buddy --help
 	@echo ""
 	@echo "✅ Binary test passed!"
 
 # Install binary to system path
-install-binary: create-binary
+install-binary: install create-binary
 	@if [ ! -f dist/time-buddy ]; then \
 		echo "❌ Binary not found. Run 'make create-binary' first."; \
 		exit 1; \
