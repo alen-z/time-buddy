@@ -107,7 +107,7 @@ make clean
 Time Buddy reads macOS system logs for screen lock/unlock events and calculates:
 
 - **Raw time**: Actual screen-on time between unlock and lock events
-- **Block time**: Time span from first to last activity (your "work block")
+- **Block time**: Sum of time spans for each continuous work session (gaps >1 hour create separate blocks)
 
 The output shows a 24-hour visualization where each block represents an hour, colored by activity intensity.
 
