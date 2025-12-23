@@ -18,7 +18,7 @@ def get_version():
         return __version__
 
 # --- Configuration ---
-EXPECTED_HOURS_PER_DAY = 7.5
+DEFAULT_EXPECTED_HOURS_PER_DAY = 7.5
 
 def get_db_path():
     """Returns the platform-specific path to the database file."""
@@ -81,7 +81,7 @@ def db_mark_day_as_cached(conn, day):
         conn.execute("INSERT OR IGNORE INTO fetched_days (day) VALUES (?)", (day.isoformat(),))
 
 
-def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_duration: timedelta):
+def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_duration: timedelta, expected_hours: float):
     """Prints a single line of 24 colored blocks representing a day's screen time."""
     # --- Color gradient (10 steps from red to green in ANSI 256-color) ---
     gradient_colors = [196, 202, 208, 214, 220, 226, 190, 154, 118, 46]
@@ -89,8 +89,8 @@ def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_durat
     total_duration = sum(hourly_durations.values(), timedelta())
     total_hours = total_duration.total_seconds() / 3600
     total_block_hours = block_duration.total_seconds() / 3600
-    raw_percentage = (total_hours / EXPECTED_HOURS_PER_DAY) * 100
-    block_percentage = (total_block_hours / EXPECTED_HOURS_PER_DAY) * 100
+    raw_percentage = (total_hours / expected_hours) * 100
+    block_percentage = (total_block_hours / expected_hours) * 100
 
     # Determine day of week and apply appropriate color
     day_of_week = day.weekday()  # Monday=0, Sunday=6
@@ -215,7 +215,7 @@ def process_day_logs(logs, current_day, verbose=False):
     return hourly_durations, total_block_duration, unlock_time
 
 
-def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False):
+def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False, expected_hours=DEFAULT_EXPECTED_HOURS_PER_DAY):
     """
     Calculates screen time for the last N days, fetching logs day by day.
 
@@ -224,6 +224,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
         verbose: Print detailed session information
         no_cache: Force refetching of all logs
         include_weekends: Count weekends toward expected work hours (default: False)
+        expected_hours: Expected working hours per day (default: 7.5)
     """
     # Lazy imports for faster --version response (third-party libs are slow to import)
     from tzlocal import get_localzone
@@ -409,7 +410,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
 
     sorted_days = sorted(daily_hourly_durations.keys())
     for day in sorted_days:
-        print_hourly_breakdown(day, daily_hourly_durations[day], daily_block_durations[day])
+        print_hourly_breakdown(day, daily_hourly_durations[day], daily_block_durations[day], expected_hours)
 
     # --- Monthly Summary ---
     print("\n--- Monthly Summary ---")
@@ -421,11 +422,11 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
     # Calculate expected hours based on include_weekends flag
     if include_weekends:
         # All active days count toward expected hours
-        total_expected_hours = len(days_with_activity) * EXPECTED_HOURS_PER_DAY
+        total_expected_hours = len(days_with_activity) * expected_hours
     else:
         # Only count weekdays (Mon-Fri) towards expected hours
         weekday_count = sum(1 for day in days_with_activity if day.weekday() < 5)
-        total_expected_hours = weekday_count * EXPECTED_HOURS_PER_DAY
+        total_expected_hours = weekday_count * expected_hours
 
     if total_expected_hours > 0:
         monthly_raw_percentage = (total_actual_hours / total_expected_hours) * 100
@@ -485,6 +486,12 @@ def main():
         action='store_true',
         help='Include weekends in expected work hours calculation. (default: False)'
     )
+    parser.add_argument(
+        '--expected-hours',
+        type=float,
+        default=DEFAULT_EXPECTED_HOURS_PER_DAY,
+        help=f'Expected working hours per day. (default: {DEFAULT_EXPECTED_HOURS_PER_DAY})'
+    )
     args = parser.parse_args()
 
     if args.clear_cache:
@@ -495,7 +502,7 @@ def main():
             print("No cache file to delete.")
         return
 
-    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends)
+    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends, args.expected_hours)
 
 
 if __name__ == "__main__":
