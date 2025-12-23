@@ -32,20 +32,25 @@ This command configures macOS to persistently store login window events. Without
 
 ## Installation
 
-### Quick Install (Recommended)
+### pip (Recommended)
+
+```bash
+pip install time-buddy
+```
+
+### Standalone Binary
+
+If you don't have Python installed:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alen-z/time-buddy/main/install.sh | bash
 ```
 
-### Build from Source
+Or build from source:
 
 ```bash
-# Clone the repository
 git clone https://github.com/alen-z/time-buddy.git
 cd time-buddy
-
-# Install dependencies and build
 make install
 make install-binary
 ```
