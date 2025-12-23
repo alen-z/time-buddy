@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-import json
-import subprocess
-from datetime import datetime, timedelta, date, time
 import argparse
-from collections import defaultdict
-from tzlocal import get_localzone
-from halo import Halo
-import colorama
-import sqlite3
+import json
 import os
-from importlib.metadata import version, PackageNotFoundError
+import sqlite3
+import subprocess
+from collections import defaultdict
+from datetime import date, datetime, time, timedelta
+
+__version__ = "0.1.0"
 
 def get_version():
     """Returns the package version."""
     try:
+        from importlib.metadata import version
         return version("time-buddy")
-    except PackageNotFoundError:
-        return "0.1.0"  # Fallback for development
+    except Exception:
+        return __version__
 
 # --- Configuration ---
 EXPECTED_HOURS_PER_DAY = 7.5
@@ -226,6 +225,11 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
         no_cache: Force refetching of all logs
         include_weekends: Count weekends toward expected work hours (default: False)
     """
+    # Lazy imports for faster --version response (third-party libs are slow to import)
+    from tzlocal import get_localzone
+    from halo import Halo
+    import colorama
+
     conn = db_connect()
     db_init(conn)
 

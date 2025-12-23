@@ -53,6 +53,9 @@ make install-binary
 ## Usage
 
 ```bash
+# Show version
+time-buddy --version
+
 # Show screen time for the last 7 days (default)
 time-buddy
 
@@ -77,6 +80,9 @@ time-buddy --clear-cache
 ```bash
 # Install dependencies
 make install
+
+# Install locally for testing (editable mode)
+pip install -e .
 
 # Run the application
 make run

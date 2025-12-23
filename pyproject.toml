@@ -10,7 +10,6 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.7"
 classifiers = [
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Environment :: Console",
     "Topic :: Utilities",
@@ -29,6 +28,9 @@ time-buddy = "time_buddy:main"
 Homepage = "https://github.com/alen-z/time-buddy"
 Repository = "https://github.com/alen-z/time-buddy"
 Issues = "https://github.com/alen-z/time-buddy/issues"
+
+[tool.setuptools]
+py-modules = ["time_buddy"]
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
