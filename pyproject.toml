@@ -5,17 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "time-buddy"
 version = "0.1.0"
-authors = [
-  { name="Your Name", email="you@example.com" },
-]
 description = "A simple to use time tracking CLI for macOS."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.7"
 classifiers = [
-    "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
+    "Environment :: Console",
+    "Topic :: Utilities",
 ]
+keywords = ["time-tracking", "macos", "cli", "screen-time", "productivity"]
 dependencies = [
     "tzlocal",
     "halo",
@@ -24,3 +24,17 @@ dependencies = [
 
 [project.scripts]
 time-buddy = "time_buddy:main"
+
+[project.urls]
+Homepage = "https://github.com/alen-z/time-buddy"
+Repository = "https://github.com/alen-z/time-buddy"
+Issues = "https://github.com/alen-z/time-buddy/issues"
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+
+[tool.semantic_release.changelog]
+changelog_file = "CHANGELOG.md"
+
+[tool.semantic_release.remote]
+type = "github"

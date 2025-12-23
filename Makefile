@@ -1,4 +1,4 @@
-.PHONY: help install create-binary clean clean-build clean-cache run test install-binary uninstall-binary
+.PHONY: help install create-binary clean clean-build clean-cache run test-binary install-binary uninstall-binary
 
 # Default target
 help:
@@ -12,7 +12,7 @@ help:
 	@echo "  make run              - Run the application (last 7 days)"
 	@echo "  make install-binary   - Install binary to /usr/local/bin"
 	@echo "  make uninstall-binary - Remove binary from /usr/local/bin"
-	@echo "  make test             - Test the binary"
+	@echo "  make test-binary      - Test the binary"
 	@echo ""
 
 # Install dependencies
@@ -56,7 +56,7 @@ run:
 	python time_buddy.py --days 7
 
 # Test the binary
-test: create-binary
+test-binary: create-binary
 	@echo "Testing binary..."
 	./dist/time-buddy --help
 	@echo ""
