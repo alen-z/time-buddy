@@ -4,7 +4,7 @@ A simple to use time tracking CLI for **macOS**.
 
 Track your screen time based on macOS system logs to calculate how many hours you've worked each day.
 
-![Time Buddy Preview](assets/2025-12-time-buddy-preview.png)
+![Time Buddy Preview](https://raw.githubusercontent.com/alen-z/time-buddy/main/assets/2025-12-time-buddy-preview.png)
 
 ## Features
 
