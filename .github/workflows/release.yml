@@ -13,7 +13,7 @@ permissions:
 jobs:
   release:
     name: Semantic Release
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     outputs:
       released: ${{ steps.semantic.outputs.released }}
       version: ${{ steps.semantic.outputs.version }}
