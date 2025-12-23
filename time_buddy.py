@@ -412,8 +412,8 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
     for day in sorted_days:
         print_hourly_breakdown(day, daily_hourly_durations[day], daily_block_durations[day], expected_hours)
 
-    # --- Monthly Summary ---
-    print("\n--- Monthly Summary ---")
+    # --- Total Summary ---
+    print("\n--- Total Summary ---")
     for day_data in daily_hourly_durations.values():
         total_actual_hours += sum(day_data.values(), timedelta()).total_seconds() / 3600
 
