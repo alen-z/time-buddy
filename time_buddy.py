@@ -10,7 +10,7 @@ import sys
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
-__version__ = "1.0.5"
+__version__ = "1.1.0"
 
 def get_version():
     """Returns the package version."""
