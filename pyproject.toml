@@ -19,6 +19,7 @@ dependencies = [
     "tzlocal",
     "halo",
     "colorama",
+    "fpdf2",
 ]
 
 [project.scripts]

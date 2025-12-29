@@ -13,6 +13,7 @@ Track your screen time based on macOS system logs to calculate how many hours yo
 - 💾 Smart caching for faster subsequent runs
 - 🎨 Colorful terminal output with progress indicators
 - 📤 Export data to CSV or JSON for integration with other tools
+- 📄 Export data as PDF for easy sharing
 
 ## Requirements
 
@@ -85,6 +86,9 @@ time-buddy --days 30 --export json
 
 # Export data as CSV
 time-buddy --days 30 --export csv > december.csv
+
+# Export data as PDF
+time-buddy --days 30 --export pdf > december-report.pdf
 ```
 
 ## Development

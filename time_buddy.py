@@ -169,6 +169,116 @@ def export_csv(records: list, summary: dict):
     print(output.getvalue(), end="")
 
 
+def export_pdf(records: list, summary: dict):
+    """Exports data as PDF to stdout."""
+    from fpdf import FPDF
+
+    class TimeBuddyPDF(FPDF):
+        def header(self):
+            self.set_font('Helvetica', 'B', 16)
+            self.cell(0, 10, 'Time Buddy Report', align='C', new_x='LMARGIN', new_y='NEXT')
+            self.ln(5)
+
+        def footer(self):
+            self.set_y(-15)
+            self.set_font('Helvetica', 'I', 8)
+            self.set_text_color(128)
+            self.cell(0, 10, f'Page {self.page_no()}', align='C')
+
+    pdf = TimeBuddyPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Report metadata
+    pdf.set_font('Helvetica', '', 10)
+    pdf.set_text_color(100)
+    if records:
+        date_range = f"{records[0]['date']} to {records[-1]['date']}"
+        pdf.cell(0, 6, f"Period: {date_range}", new_x='LMARGIN', new_y='NEXT')
+    pdf.cell(0, 6, f"Expected hours/day: {summary.get('expected_hours_per_day', 7.5)}", new_x='LMARGIN', new_y='NEXT')
+    pdf.ln(8)
+
+    # Table header
+    pdf.set_fill_color(45, 55, 72)
+    pdf.set_text_color(255)
+    pdf.set_font('Helvetica', 'B', 9)
+
+    col_widths = [25, 15, 22, 18, 22, 18, 70]
+    headers = ['Date', 'Day', 'Raw (h)', 'Raw %', 'Block (h)', 'Block %', 'Activity (24h)']
+
+    for i, header in enumerate(headers):
+        pdf.cell(col_widths[i], 8, header, border=1, align='C', fill=True)
+    pdf.ln()
+
+    # Table rows
+    pdf.set_font('Helvetica', '', 8)
+    pdf.set_text_color(0)
+
+    for idx, record in enumerate(records):
+        # Alternate row colors
+        if idx % 2 == 0:
+            pdf.set_fill_color(249, 250, 251)
+        else:
+            pdf.set_fill_color(255, 255, 255)
+
+        # Weekend rows get a slight blue tint
+        if record['is_weekend']:
+            pdf.set_fill_color(239, 246, 255)
+
+        pdf.cell(col_widths[0], 7, record['date'], border=1, align='C', fill=True)
+        pdf.cell(col_widths[1], 7, record['day_of_week'], border=1, align='C', fill=True)
+        pdf.cell(col_widths[2], 7, f"{record['raw_hours']:.1f}", border=1, align='C', fill=True)
+        pdf.cell(col_widths[3], 7, f"{record['raw_percentage']:.0f}%", border=1, align='C', fill=True)
+        pdf.cell(col_widths[4], 7, f"{record['block_hours']:.1f}", border=1, align='C', fill=True)
+        pdf.cell(col_widths[5], 7, f"{record['block_percentage']:.0f}%", border=1, align='C', fill=True)
+
+        # Activity visualization (24 blocks)
+        x_start = pdf.get_x()
+        y_pos = pdf.get_y()
+        block_width = col_widths[6] / 24
+
+        for hour in range(24):
+            minutes = record['hourly_minutes'].get(hour, 0)
+            # Color based on activity (gray to green gradient)
+            if minutes > 0:
+                intensity = min(int((minutes / 60) * 255), 255)
+                pdf.set_fill_color(100, 150 + int(intensity * 0.4), 100)
+            else:
+                pdf.set_fill_color(230, 230, 230)
+
+            pdf.rect(x_start + (hour * block_width), y_pos, block_width, 7, style='F')
+
+        # Draw border around activity cell
+        pdf.rect(x_start, y_pos, col_widths[6], 7, style='D')
+        pdf.set_xy(x_start + col_widths[6], y_pos)
+        pdf.ln()
+
+    # Summary row
+    pdf.ln(3)
+    pdf.set_fill_color(45, 55, 72)
+    pdf.set_text_color(255)
+    pdf.set_font('Helvetica', 'B', 9)
+
+    pdf.cell(col_widths[0], 8, 'TOTAL', border=1, align='C', fill=True)
+    pdf.cell(col_widths[1], 8, f"{summary['total_days']}d", border=1, align='C', fill=True)
+    pdf.cell(col_widths[2], 8, f"{summary['total_raw_hours']:.1f}", border=1, align='C', fill=True)
+    pdf.cell(col_widths[3], 8, f"{summary['total_raw_percentage']:.0f}%", border=1, align='C', fill=True)
+    pdf.cell(col_widths[4], 8, f"{summary['total_block_hours']:.1f}", border=1, align='C', fill=True)
+    pdf.cell(col_widths[5], 8, f"{summary['total_block_percentage']:.0f}%", border=1, align='C', fill=True)
+    pdf.cell(col_widths[6], 8, '', border=1, fill=True)
+    pdf.ln()
+
+    # Legend
+    pdf.ln(8)
+    pdf.set_text_color(100)
+    pdf.set_font('Helvetica', 'I', 8)
+    pdf.cell(0, 5, 'Activity visualization: Each block represents 1 hour (00:00-23:00). Darker green = more activity.', new_x='LMARGIN', new_y='NEXT')
+
+    # Output PDF to stdout as binary
+    pdf_bytes = pdf.output()
+    sys.stdout.buffer.write(pdf_bytes)
+
+
 def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_duration: timedelta, expected_hours: float):
     """Prints a single line of 24 colored blocks representing a day's screen time."""
     # --- Color gradient (10 steps from red to green in ANSI 256-color) ---
@@ -488,10 +598,13 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
     # --- Calculate totals ---
     if not daily_hourly_durations:
         if is_export_mode:
+            empty_summary = {"total_days": 0, "total_raw_hours": 0, "total_raw_percentage": 0, "total_block_hours": 0, "total_block_percentage": 0}
             if export_format == 'json':
-                export_json([], {"total_days": 0, "total_raw_hours": 0, "total_raw_percentage": 0, "total_block_hours": 0, "total_block_percentage": 0})
+                export_json([], empty_summary)
             elif export_format == 'csv':
-                export_csv([], {"total_days": 0, "total_raw_hours": 0, "total_raw_percentage": 0, "total_block_hours": 0, "total_block_percentage": 0})
+                export_csv([], empty_summary)
+            elif export_format == 'pdf':
+                export_pdf([], empty_summary)
         else:
             print("\n--- Daily Screen Time Summary ---")
             print("No screen time data found for the selected period.")
@@ -540,6 +653,8 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
             export_json(records, summary)
         elif export_format == 'csv':
             export_csv(records, summary)
+        elif export_format == 'pdf':
+            export_pdf(records, summary)
         return
 
     # --- Visual Output Mode ---
@@ -613,7 +728,7 @@ def main():
     parser.add_argument(
         '--export',
         type=str,
-        choices=['csv', 'json'],
+        choices=['csv', 'json', 'pdf'],
         default=None,
         metavar='FORMAT',
         help='Export data in specified format (csv or json) instead of visual output.'
