@@ -12,6 +12,7 @@ Track your screen time based on macOS system logs to calculate how many hours yo
 - 📅 Calculate time spent per day with hourly breakdown visualization
 - 💾 Smart caching for faster subsequent runs
 - 🎨 Colorful terminal output with progress indicators
+- 📤 Export data to CSV or JSON for integration with other tools
 
 ## Requirements
 
@@ -78,6 +79,12 @@ time-buddy --include-weekends
 
 # Clear the cache
 time-buddy --clear-cache
+
+# Export data as JSON
+time-buddy --days 30 --export json
+
+# Export data as CSV
+time-buddy --days 30 --export csv > december.csv
 ```
 
 ## Development

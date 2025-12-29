@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import csv
+import io
 import json
 import os
 import sqlite3
 import subprocess
+import sys
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
@@ -81,32 +84,109 @@ def db_mark_day_as_cached(conn, day):
         conn.execute("INSERT OR IGNORE INTO fetched_days (day) VALUES (?)", (day.isoformat(),))
 
 
-def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_duration: timedelta, expected_hours: float):
-    """Prints a single line of 24 colored blocks representing a day's screen time."""
-    # --- Color gradient (10 steps from red to green in ANSI 256-color) ---
-    gradient_colors = [196, 202, 208, 214, 220, 226, 190, 154, 118, 46]
-
+# --- Export Functions ---
+def build_day_record(day: date, hourly_durations: defaultdict, block_duration: timedelta, expected_hours: float):
+    """Builds a dictionary record for a single day's data."""
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     total_duration = sum(hourly_durations.values(), timedelta())
     total_hours = total_duration.total_seconds() / 3600
     total_block_hours = block_duration.total_seconds() / 3600
     raw_percentage = (total_hours / expected_hours) * 100
     block_percentage = (total_block_hours / expected_hours) * 100
 
-    # Determine day of week and apply appropriate color
-    day_of_week = day.weekday()  # Monday=0, Sunday=6
-    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    day_name = day_names[day_of_week]
-
-    # Use cyan for weekends, default color for weekdays
-    if day_of_week >= 5:  # Saturday or Sunday
-        day_label = f" \033[38;5;51m({day_name})\033[0m"
-    else:
-        day_label = f" ({day_name})"
-
-    output_line = f"{day.isoformat()}{day_label}: "
-
+    # Build hourly breakdown (minutes per hour)
+    hourly_minutes = {}
     for hour in range(24):
         minutes = hourly_durations.get(hour, timedelta()).total_seconds() / 60
+        hourly_minutes[hour] = round(minutes, 1)
+
+    return {
+        "date": day.isoformat(),
+        "day_of_week": day_names[day.weekday()],
+        "is_weekend": day.weekday() >= 5,
+        "raw_hours": round(total_hours, 2),
+        "raw_percentage": round(raw_percentage, 1),
+        "block_hours": round(total_block_hours, 2),
+        "block_percentage": round(block_percentage, 1),
+        "hourly_minutes": hourly_minutes,
+    }
+
+
+def export_json(records: list, summary: dict):
+    """Exports data as JSON to stdout."""
+    output = {
+        "days": records,
+        "summary": summary,
+    }
+    print(json.dumps(output, indent=2))
+
+
+def export_csv(records: list, summary: dict):
+    """Exports data as CSV to stdout."""
+    if not records:
+        return
+
+    output = io.StringIO()
+    fieldnames = [
+        "date", "day_of_week", "is_weekend",
+        "raw_hours", "raw_percentage", "block_hours", "block_percentage"
+    ]
+    # Add hourly columns
+    for hour in range(24):
+        fieldnames.append(f"hour_{hour:02d}")
+
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for record in records:
+        row = {
+            "date": record["date"],
+            "day_of_week": record["day_of_week"],
+            "is_weekend": record["is_weekend"],
+            "raw_hours": record["raw_hours"],
+            "raw_percentage": record["raw_percentage"],
+            "block_hours": record["block_hours"],
+            "block_percentage": record["block_percentage"],
+        }
+        # Add hourly data
+        for hour in range(24):
+            row[f"hour_{hour:02d}"] = record["hourly_minutes"].get(hour, 0)
+        writer.writerow(row)
+
+    # Add empty row and summary
+    writer.writerow({})
+    summary_row = {
+        "date": "TOTAL",
+        "day_of_week": f"{summary['total_days']} days",
+        "is_weekend": "",
+        "raw_hours": summary["total_raw_hours"],
+        "raw_percentage": summary["total_raw_percentage"],
+        "block_hours": summary["total_block_hours"],
+        "block_percentage": summary["total_block_percentage"],
+    }
+    writer.writerow(summary_row)
+
+    print(output.getvalue(), end="")
+
+
+def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_duration: timedelta, expected_hours: float):
+    """Prints a single line of 24 colored blocks representing a day's screen time."""
+    # --- Color gradient (10 steps from red to green in ANSI 256-color) ---
+    gradient_colors = [196, 202, 208, 214, 220, 226, 190, 154, 118, 46]
+
+    # Use build_day_record for all calculations
+    record = build_day_record(day, hourly_durations, block_duration, expected_hours)
+
+    # Use cyan for weekends, default color for weekdays
+    if record["is_weekend"]:
+        day_label = f" \033[38;5;51m({record['day_of_week']})\033[0m"
+    else:
+        day_label = f" ({record['day_of_week']})"
+
+    output_line = f"{record['date']}{day_label}: "
+
+    for hour in range(24):
+        minutes = record["hourly_minutes"][hour]
 
         color_code = ""
         if minutes > 0:
@@ -120,8 +200,8 @@ def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_durat
 
         output_line += f"{color_code}█\033[0m"
 
-    raw_str = f"Raw: {total_hours:.1f} h ({raw_percentage:.0f}%)"
-    block_str = f"Block: {total_block_hours:.1f} h ({block_percentage:.0f}%)"
+    raw_str = f"Raw: {record['raw_hours']:.1f} h ({record['raw_percentage']:.0f}%)"
+    block_str = f"Block: {record['block_hours']:.1f} h ({record['block_percentage']:.0f}%)"
     output_line += f"  {raw_str:<22}{block_str}"
     print(output_line)
 
@@ -215,7 +295,7 @@ def process_day_logs(logs, current_day, verbose=False):
     return hourly_durations, total_block_duration, unlock_time
 
 
-def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False, expected_hours=DEFAULT_EXPECTED_HOURS_PER_DAY):
+def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False, expected_hours=DEFAULT_EXPECTED_HOURS_PER_DAY, export_format=None):
     """
     Calculates screen time for the last N days, fetching logs day by day.
 
@@ -225,6 +305,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
         no_cache: Force refetching of all logs
         include_weekends: Count weekends toward expected work hours (default: False)
         expected_hours: Expected working hours per day (default: 7.5)
+        export_format: Export format ('csv', 'json', or None for visual output)
     """
     # Lazy imports for faster --version response (third-party libs are slow to import)
     from tzlocal import get_localzone
@@ -241,8 +322,10 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
     days_with_activity = set()
     local_tz = get_localzone()
 
+    # Disable spinner and visual output for export mode
+    is_export_mode = export_format is not None
     spinner = None
-    if not verbose:
+    if not verbose and not is_export_mode:
         spinner = Halo(text='Initializing...', spinner='dots')
         spinner.start()
 
@@ -402,18 +485,18 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
         spinner.stop()
         colorama.reinit()
 
-    # --- Print Summaries ---
-    print("\n--- Daily Screen Time Summary ---")
+    # --- Calculate totals ---
     if not daily_hourly_durations:
-        print("No screen time data found for the selected period.")
+        if is_export_mode:
+            if export_format == 'json':
+                export_json([], {"total_days": 0, "total_raw_hours": 0, "total_raw_percentage": 0, "total_block_hours": 0, "total_block_percentage": 0})
+            elif export_format == 'csv':
+                export_csv([], {"total_days": 0, "total_raw_hours": 0, "total_raw_percentage": 0, "total_block_hours": 0, "total_block_percentage": 0})
+        else:
+            print("\n--- Daily Screen Time Summary ---")
+            print("No screen time data found for the selected period.")
         return
 
-    sorted_days = sorted(daily_hourly_durations.keys())
-    for day in sorted_days:
-        print_hourly_breakdown(day, daily_hourly_durations[day], daily_block_durations[day], expected_hours)
-
-    # --- Total Summary ---
-    print("\n--- Total Summary ---")
     for day_data in daily_hourly_durations.values():
         total_actual_hours += sum(day_data.values(), timedelta()).total_seconds() / 3600
 
@@ -421,21 +504,56 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
 
     # Calculate expected hours based on include_weekends flag
     if include_weekends:
-        # All active days count toward expected hours
         total_expected_hours = len(days_with_activity) * expected_hours
     else:
-        # Only count weekdays (Mon-Fri) towards expected hours
         weekday_count = sum(1 for day in days_with_activity if day.weekday() < 5)
         total_expected_hours = weekday_count * expected_hours
 
+    total_days = len(days_with_activity)
     if total_expected_hours > 0:
         monthly_raw_percentage = (total_actual_hours / total_expected_hours) * 100
         monthly_block_percentage = (total_block_hours / total_expected_hours) * 100
+    else:
+        monthly_raw_percentage = 0
+        monthly_block_percentage = 0
 
+    # Build summary data
+    summary = {
+        "total_days": total_days,
+        "total_raw_hours": round(total_actual_hours, 2),
+        "total_raw_percentage": round(monthly_raw_percentage, 1),
+        "total_block_hours": round(total_block_hours, 2),
+        "total_block_percentage": round(monthly_block_percentage, 1),
+        "expected_hours_per_day": expected_hours,
+        "include_weekends": include_weekends,
+    }
+
+    # --- Export Mode ---
+    if is_export_mode:
+        sorted_days = sorted(daily_hourly_durations.keys())
+        records = [
+            build_day_record(day, daily_hourly_durations[day], daily_block_durations[day], expected_hours)
+            for day in sorted_days
+        ]
+
+        if export_format == 'json':
+            export_json(records, summary)
+        elif export_format == 'csv':
+            export_csv(records, summary)
+        return
+
+    # --- Visual Output Mode ---
+    print("\n--- Daily Screen Time Summary ---")
+    sorted_days = sorted(daily_hourly_durations.keys())
+    for day in sorted_days:
+        print_hourly_breakdown(day, daily_hourly_durations[day], daily_block_durations[day], expected_hours)
+
+    # --- Total Summary ---
+    print("\n--- Total Summary ---")
+    if total_expected_hours > 0:
         raw_str = f"Raw: {total_actual_hours:.1f} h ({monthly_raw_percentage:.0f}%)"
         block_str = f"Block: {total_block_hours:.1f} h ({monthly_block_percentage:.0f}%)"
 
-        total_days = len(days_with_activity)
         if not include_weekends:
             weekday_count = sum(1 for day in days_with_activity if day.weekday() < 5)
             weekend_count = total_days - weekday_count
@@ -492,6 +610,14 @@ def main():
         default=DEFAULT_EXPECTED_HOURS_PER_DAY,
         help=f'Expected working hours per day. (default: {DEFAULT_EXPECTED_HOURS_PER_DAY})'
     )
+    parser.add_argument(
+        '--export',
+        type=str,
+        choices=['csv', 'json'],
+        default=None,
+        metavar='FORMAT',
+        help='Export data in specified format (csv or json) instead of visual output.'
+    )
     args = parser.parse_args()
 
     if args.clear_cache:
@@ -502,7 +628,7 @@ def main():
             print("No cache file to delete.")
         return
 
-    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends, args.expected_hours)
+    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends, args.expected_hours, args.export)
 
 
 if __name__ == "__main__":
