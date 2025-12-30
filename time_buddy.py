@@ -678,7 +678,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
     compare_start_date = None
     compare_end_date = None
     if compare_offset is not None:
-        compare_end_date = current_start_date - timedelta(days=compare_offset)
+        compare_end_date = current_start_date - timedelta(days=compare_offset + 1)
         compare_start_date = compare_end_date - timedelta(days=days_back - 1)
 
     # Disable spinner and visual output for export mode
