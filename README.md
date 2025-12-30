@@ -91,6 +91,9 @@ time-buddy --days 30 --export csv > december.csv
 # Export data as PDF
 time-buddy --days 30 --export pdf > december-report.pdf
 
+# View 7 days from a month ago
+time-buddy --days 7 --offset 30
+
 # Compare with previous consecutive period (no gap)
 time-buddy --days 7 --compare-offset-days 0
 

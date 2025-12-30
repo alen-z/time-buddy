@@ -645,7 +645,7 @@ def format_trend(current_value, previous_value):
         return f"\033[38;5;240m→ 0.0%\033[0m"
 
 
-def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False, expected_hours=DEFAULT_EXPECTED_HOURS_PER_DAY, export_format=None, compare_offset_days=None):
+def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False, expected_hours=DEFAULT_EXPECTED_HOURS_PER_DAY, export_format=None, offset=0, compare_offset_days=None):
     """
     Calculates screen time for the last N days, fetching logs day by day.
 
@@ -656,6 +656,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
         include_weekends: Count weekends toward expected work hours (default: False)
         expected_hours: Expected working hours per day (default: 7.5)
         export_format: Export format ('csv', 'json', or None for visual output)
+        offset: Shift the period back by this many days from today (default: 0)
         compare_offset_days: If provided, compare with period offset by this many days
     """
     # Lazy imports for faster --version response (third-party libs are slow to import)
@@ -669,9 +670,9 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
     today = datetime.now().date()
     local_tz = get_localzone()
 
-    # Define current period
-    current_end_date = today
-    current_start_date = today - timedelta(days=days_back - 1)
+    # Define current period (with optional offset from today)
+    current_end_date = today - timedelta(days=offset)
+    current_start_date = current_end_date - timedelta(days=days_back - 1)
 
     # Define comparison period if requested
     compare_start_date = None
@@ -869,6 +870,13 @@ def main():
         help='Export data in specified format (csv or json) instead of visual output.'
     )
     parser.add_argument(
+        '--offset',
+        type=int,
+        default=0,
+        metavar='DAYS',
+        help='Shift the period back by DAYS from today. E.g., --days 7 --offset 30 shows 7 days ending 30 days ago. (default: 0)'
+    )
+    parser.add_argument(
         '--compare-offset-days',
         type=int,
         default=None,
@@ -885,7 +893,7 @@ def main():
             print("No cache file to delete.")
         return
 
-    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends, args.expected_hours, args.export, args.compare_offset_days)
+    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends, args.expected_hours, args.export, args.offset, args.compare_offset_days)
 
 
 if __name__ == "__main__":
