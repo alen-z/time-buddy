@@ -645,7 +645,7 @@ def format_trend(current_value, previous_value):
         return f"\033[38;5;240m→ 0.0%\033[0m"
 
 
-def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False, expected_hours=DEFAULT_EXPECTED_HOURS_PER_DAY, export_format=None, offset=0, compare_offset_days=None):
+def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=False, expected_hours=DEFAULT_EXPECTED_HOURS_PER_DAY, export_format=None, offset=0, compare_offset=None):
     """
     Calculates screen time for the last N days, fetching logs day by day.
 
@@ -657,7 +657,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
         expected_hours: Expected working hours per day (default: 7.5)
         export_format: Export format ('csv', 'json', or None for visual output)
         offset: Shift the period back by this many days from today (default: 0)
-        compare_offset_days: If provided, compare with period offset by this many days
+        compare_offset: If provided, compare with period offset by this many days
     """
     # Lazy imports for faster --version response (third-party libs are slow to import)
     from tzlocal import get_localzone
@@ -677,8 +677,8 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
     # Define comparison period if requested
     compare_start_date = None
     compare_end_date = None
-    if compare_offset_days is not None:
-        compare_end_date = current_start_date - timedelta(days=compare_offset_days)
+    if compare_offset is not None:
+        compare_end_date = current_start_date - timedelta(days=compare_offset)
         compare_start_date = compare_end_date - timedelta(days=days_back - 1)
 
     # Disable spinner and visual output for export mode
@@ -698,7 +698,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
 
     try:
         # Fetch comparison period first (if requested)
-        if compare_offset_days is not None:
+        if compare_offset is not None:
             if spinner:
                 spinner.text = f"Fetching comparison period ({compare_start_date} to {compare_end_date})..."
             compare_hourly_durations, compare_block_durations, compare_days_with_activity = fetch_period_data(
@@ -728,7 +728,7 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
     # Calculate summaries
     summary = calculate_period_summary(daily_hourly_durations, daily_block_durations, days_with_activity, include_weekends, expected_hours)
     compare_summary = None
-    if compare_offset_days is not None:
+    if compare_offset is not None:
         compare_summary = calculate_period_summary(compare_hourly_durations, compare_block_durations, compare_days_with_activity, include_weekends, expected_hours)
 
     # --- Handle empty data ---
@@ -877,11 +877,13 @@ def main():
         help='Shift the period back by DAYS from today. E.g., --days 7 --offset 30 shows 7 days ending 30 days ago. (default: 0)'
     )
     parser.add_argument(
-        '--compare-offset-days',
+        '--compare-offset',
         type=int,
+        nargs='?',
+        const=0,
         default=None,
         metavar='DAYS',
-        help='Compare current period with a previous period. DAYS is the gap between periods (offset from first day of current period). Use 0 for consecutive periods, 7 to skip a week.'
+        help='Compare current period with a previous period. DAYS is the gap between periods (default: 0 for consecutive periods). Use 7 to skip a week.'
     )
     args = parser.parse_args()
 
@@ -893,7 +895,7 @@ def main():
             print("No cache file to delete.")
         return
 
-    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends, args.expected_hours, args.export, args.offset, args.compare_offset_days)
+    get_screen_time(args.days, args.verbose, args.no_cache, args.include_weekends, args.expected_hours, args.export, args.offset, args.compare_offset)
 
 
 if __name__ == "__main__":

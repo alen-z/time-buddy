@@ -94,11 +94,11 @@ time-buddy --days 30 --export pdf > december-report.pdf
 # View 7 days from a month ago
 time-buddy --days 7 --offset 30
 
-# Compare with previous consecutive period (no gap)
-time-buddy --days 7 --compare-offset-days 0
+# Compare with previous consecutive period (default: no gap)
+time-buddy --days 7 --compare-offset
 
 # Compare with a week gap (e.g., this week vs 2 weeks ago)
-time-buddy --days 7 --compare-offset-days 7
+time-buddy --days 7 --compare-offset 7
 ```
 
 ## Development
