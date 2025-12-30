@@ -10,6 +10,7 @@ Track your screen time based on macOS system logs to calculate how many hours yo
 
 - 📊 Track screen time based on macOS unlock/lock events
 - 📅 Calculate time spent per day with hourly breakdown visualization
+- 📈 Compare periods with trend analysis (week-over-week, etc.)
 - 💾 Smart caching for faster subsequent runs
 - 🎨 Colorful terminal output with progress indicators
 - 📤 Export data to CSV or JSON for integration with other tools
@@ -89,6 +90,12 @@ time-buddy --days 30 --export csv > december.csv
 
 # Export data as PDF
 time-buddy --days 30 --export pdf > december-report.pdf
+
+# Compare with previous consecutive period (no gap)
+time-buddy --days 7 --compare-offset-days 0
+
+# Compare with a week gap (e.g., this week vs 2 weeks ago)
+time-buddy --days 7 --compare-offset-days 7
 ```
 
 ## Development
