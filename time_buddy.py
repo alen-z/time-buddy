@@ -471,10 +471,25 @@ def fetch_period_data(start_date, end_date, verbose=False, no_cache=False, spinn
             try:
                 result = subprocess.run(command, capture_output=True, text=True, check=True)
                 fetched_logs = json.loads(result.stdout)
-                logs.extend(fetched_logs)
+
+                # Filter logs to only include entries from the requested date.
+                # macOS log show may return logs from other dates when requested range has no data.
+                filtered_logs = []
+                for entry in fetched_logs:
+                    ts = entry.get("timestamp", "")
+                    if ts:
+                        # Timestamp format: "2026-01-14 09:32:25.629835+0100"
+                        log_date_str = ts[:10]  # Extract "YYYY-MM-DD"
+                        if log_date_str == current_day.isoformat():
+                            filtered_logs.append(entry)
+
+                logs.extend(filtered_logs)
 
                 if verbose:
-                    print(f"Found {len(logs)} log entries.")
+                    if len(fetched_logs) != len(filtered_logs):
+                        print(f"Found {len(fetched_logs)} log entries, {len(filtered_logs)} match the requested date.")
+                    else:
+                        print(f"Found {len(logs)} log entries.")
 
                 # Cache the newly fetched logs
                 db_cache_logs(conn, current_day, logs)
