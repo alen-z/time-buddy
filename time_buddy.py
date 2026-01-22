@@ -904,6 +904,32 @@ def main():
 
     if args.clear_cache:
         if os.path.exists(DB_FILE):
+            print(f"Cache file: {DB_FILE}")
+            print("\nThis will delete the current database.")
+            print("A new database will be created on the next run.")
+            
+            try:
+                response = input("\nAre you sure you want to clear the cache? [y/N]: ").strip().lower()
+                if response != 'y':
+                    print("Operation cancelled.")
+                    return
+                
+                backup_response = input("Create a backup before deleting? [Y/n]: ").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print("\nOperation cancelled.")
+                return
+            
+            # Create backup if requested (default is yes)
+            if backup_response != 'n':
+                import shutil
+                import secrets
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                random_hash = secrets.token_hex(4)
+                backup_path = f"{DB_FILE}.backup.{timestamp}_{random_hash}"
+                shutil.copy2(DB_FILE, backup_path)
+                print(f"Backup created: {backup_path}")
+            
+            # Delete the original
             os.remove(DB_FILE)
             print(f"Cache file '{DB_FILE}' has been deleted.")
         else:
