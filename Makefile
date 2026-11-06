@@ -69,6 +69,8 @@ install-binary: install create-binary
 		exit 1; \
 	fi
 	@echo "Installing binary to /usr/local/bin/..."
+	# Remove first: overwriting a signed binary in place gets it SIGKILLed on Apple Silicon
+	sudo rm -f /usr/local/bin/time-buddy
 	sudo cp dist/time-buddy /usr/local/bin/time-buddy
 	sudo chmod +x /usr/local/bin/time-buddy
 	@echo "✅ Binary installed successfully!"

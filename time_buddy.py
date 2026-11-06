@@ -4,11 +4,14 @@ import csv
 import io
 import json
 import os
+import plistlib
+import re
 import sqlite3
 import subprocess
 import sys
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+from time import sleep
 
 __version__ = "1.3.0"
 
@@ -22,6 +25,22 @@ def get_version():
 
 # --- Configuration ---
 DEFAULT_EXPECTED_HOURS_PER_DAY = 7.5
+LOG_BIN = '/usr/bin/log'
+
+# Lock/unlock (loginwindow), system sleep/wake (powerd) and display on/off (kernel).
+LOG_PREDICATE = (
+    '(process == "loginwindow" and eventMessage contains "com.apple.sessionagent.screenIs") or '
+    '(process == "powerd" and (eventMessage beginswith "Entering Sleep state" or eventMessage beginswith "Wake from")) or '
+    '(process == "kernel" and eventMessage contains "Display status changed")'
+)
+
+# --- Daemon configuration ---
+DAEMON_LABEL = "com.timebuddy.collect"
+DAEMON_PLIST = os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents", f"{DAEMON_LABEL}.plist")
+DAEMON_LOG_DIR = os.path.join(os.path.expanduser("~"), "Library", "Logs", "TimeBuddy")
+DAEMON_LOG = os.path.join(DAEMON_LOG_DIR, "collect.log")
+COLLECT_OVERLAP_SECONDS = 60
+DEFAULT_COLLECT_INTERVAL_MIN = 720
 
 def get_db_path():
     """Returns the platform-specific path to the database file."""
@@ -41,7 +60,7 @@ DB_FILE = get_db_path()
 # --- Database Functions ---
 def db_connect():
     """Connects to the SQLite database."""
-    return sqlite3.connect(DB_FILE)
+    return sqlite3.connect(DB_FILE, timeout=30)
 
 def db_init(conn):
     """Initializes the database schema."""
@@ -56,14 +75,25 @@ def db_init(conn):
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS fetched_days (
-                day TEXT PRIMARY KEY
+                day TEXT PRIMARY KEY,
+                power INTEGER NOT NULL DEFAULT 0
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        # Databases created before sleep/wake and display events were collected
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(fetched_days)")]
+        if "power" not in columns:
+            conn.execute("ALTER TABLE fetched_days ADD COLUMN power INTEGER NOT NULL DEFAULT 0")
 
 def db_is_day_cached(conn, day):
     """Checks if a past day has been fully cached."""
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM fetched_days WHERE day = ?", (day.isoformat(),))
+    cursor.execute("SELECT 1 FROM fetched_days WHERE day = ? AND power = 1", (day.isoformat(),))
     return cursor.fetchone() is not None
 
 def db_get_logs_for_day(conn, day):
@@ -81,7 +111,57 @@ def db_cache_logs(conn, day, logs):
 def db_mark_day_as_cached(conn, day):
     """Marks a day as fully fetched in the database."""
     with conn:
-        conn.execute("INSERT OR IGNORE INTO fetched_days (day) VALUES (?)", (day.isoformat(),))
+        conn.execute("INSERT OR REPLACE INTO fetched_days (day, power) VALUES (?, 1)", (day.isoformat(),))
+
+def db_get_meta(conn, key):
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+def db_set_meta(conn, key, value):
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+def db_latest_timestamp(conn, day):
+    """Returns the newest cached log timestamp for a day, or None."""
+    row = conn.execute("SELECT MAX(timestamp) FROM raw_logs WHERE day = ?", (day.isoformat(),)).fetchone()
+    return row[0] if row else None
+
+
+# --- Log fetching ---
+def fetch_log_range(start, end, local_tz):
+    """
+    Runs `log show` for [start, end] (naive local datetimes) and returns the matching entries.
+    Raises CalledProcessError / JSONDecodeError on failure.
+    """
+    command = [
+        LOG_BIN, 'show', '--style', 'json',
+        '--predicate', LOG_PREDICATE,
+        '--start', start.replace(tzinfo=local_tz).strftime('%Y-%m-%d %H:%M:%S%z'),
+        '--end', end.replace(tzinfo=local_tz).strftime('%Y-%m-%d %H:%M:%S%z')
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        if e.returncode == 1 and not e.stdout and not e.stderr:
+            return []  # No logs found
+        raise
+    fetched_logs = json.loads(result.stdout)
+
+    # macOS log show may return logs outside the requested range when it has no data.
+    # Timestamp format: "2026-01-14 09:32:25.629835+0100"
+    def in_range(entry):
+        try:
+            return start <= datetime.strptime(entry.get("timestamp", "")[:19], "%Y-%m-%d %H:%M:%S") <= end
+        except ValueError:
+            return False
+    return [e for e in fetched_logs if in_range(e)]
+
+
+def fetch_day_logs(current_day, local_tz):
+    """Returns the log entries dated `current_day`."""
+    start = datetime.combine(current_day, datetime.min.time())
+    end = datetime.combine(current_day, datetime.max.time())
+    return fetch_log_range(start, end, local_tz)
 
 
 # --- Export Functions ---
@@ -316,93 +396,119 @@ def print_hourly_breakdown(day: date, hourly_durations: defaultdict, block_durat
     print(output_line)
 
 
+def add_session_hours(hourly_durations, start, end):
+    """Splits a session across hour buckets."""
+    current_time = start
+    while current_time < end:
+        next_hour_start = current_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        segment_end = min(end, next_hour_start)
+        hourly_durations[current_time.hour] += segment_end - current_time
+        current_time = next_hour_start
+
+
+def parse_log_event(entry):
+    """Maps a raw log entry to (timestamp, kind) or None. Kinds: unlocked, locked, display_on, display_off, sleep, wake."""
+    timestamp_str = entry.get("timestamp")
+    if not timestamp_str:
+        return None
+
+    try:
+        timestamp = datetime.fromisoformat(timestamp_str)
+    except ValueError:
+        try:
+            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            return None
+
+    message = entry.get("eventMessage", "")
+
+    if "screenIsUnlocked" in message:
+        return timestamp, 'unlocked'
+    if "screenIsLocked" in message:
+        return timestamp, 'locked'
+    display = re.search(r"Display status changed: (\d)", message)
+    if display:
+        return timestamp, 'display_on' if display.group(1) == '1' else 'display_off'
+    if message.startswith("Entering Sleep state"):
+        return timestamp, 'sleep'
+    if message.startswith("Wake from"):
+        return timestamp, 'wake'
+    return None
+
+
 def process_day_logs(logs, current_day, verbose=False):
-    """Processes log entries for a single day and returns hourly durations and block duration."""
+    """
+    Processes log entries for a single day.
+
+    A session is active while the screen is unlocked, the display is on and the system is awake.
+    Returns (hourly_durations, block_duration, open_session_start, end_state), where end_state
+    holds the unlocked/display/sleep state at the end of the day for carrying into the next day.
+    """
     events = []
     for entry in logs:
-        timestamp_str = entry.get("timestamp")
-        if not timestamp_str:
-            continue
-
-        try:
-            timestamp = datetime.fromisoformat(timestamp_str)
-        except ValueError:
-            try:
-                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
-            except ValueError:
-                continue
-
+        event = parse_log_event(entry)
         # Ensure the event belongs to the current day being processed
-        if timestamp.date() != current_day:
-            continue
+        if event and event[0].date() == current_day:
+            events.append(event)
 
-        message = entry.get("eventMessage", "")
+    events.sort(key=lambda x: x[0])
 
-        if "screenIsUnlocked" in message:
-            events.append({'timestamp': timestamp, 'type': 'unlocked'})
-        elif "screenIsLocked" in message:
-            events.append({'timestamp': timestamp, 'type': 'locked'})
-
-    events.sort(key=lambda x: x['timestamp'])
-
-    # --- Calculate precise screen time (sum of unlock-to-lock sessions) ---
-    hourly_durations = defaultdict(timedelta)
-    unlock_time = None
+    unlocked, display_on, asleep = False, True, False
+    active_start = None
+    sessions = []
+    last_tzinfo = None
     if verbose:
         print(f"Processing sessions for {current_day.isoformat()}:")
 
-    for event in events:
-        if event['type'] == 'unlocked':
-            if unlock_time is None:
-                unlock_time = event['timestamp']
-        elif event['type'] == 'locked':
-            if unlock_time is not None:
-                lock_time = event['timestamp']
-                duration = lock_time - unlock_time
-                if verbose:
-                    print(f"  - Session from {unlock_time.strftime('%Y-%m-%d %H:%M:%S')} to {lock_time.strftime('%Y-%m-%d %H:%M:%S')} (Duration: {duration})")
+    for timestamp, kind in events:
+        last_tzinfo = timestamp.tzinfo
+        if kind == 'unlocked':
+            # An unlock implies a lit, awake display even if those events were missed
+            unlocked, display_on, asleep = True, True, False
+        elif kind == 'locked':
+            unlocked = False
+        elif kind == 'display_on':
+            display_on, asleep = True, False
+        elif kind == 'display_off':
+            display_on = False
+        elif kind == 'sleep':
+            asleep = True
+        elif kind == 'wake':
+            asleep = False
 
-                current_time = unlock_time
-                while current_time < lock_time:
-                    current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
-                    next_hour_start = current_hour_start + timedelta(hours=1)
+        is_active = unlocked and display_on and not asleep
+        if is_active and active_start is None:
+            active_start = timestamp
+        elif not is_active and active_start is not None:
+            sessions.append((active_start, timestamp, kind))
+            active_start = None
 
-                    segment_end = min(lock_time, next_hour_start)
-                    duration_in_hour = segment_end - current_time
-
-                    hourly_durations[current_time.hour] += duration_in_hour
-
-                    current_time = next_hour_start
-
-                unlock_time = None
+    hourly_durations = defaultdict(timedelta)
+    for start, end, ended_by in sessions:
+        if verbose:
+            print(f"  - Session from {start.strftime('%Y-%m-%d %H:%M:%S')} to {end.strftime('%Y-%m-%d %H:%M:%S')} (Duration: {end - start}, ended by {ended_by})")
+        add_session_hours(hourly_durations, start, end)
 
     # --- Calculate Block Time (total span of continuous activity) ---
+    # Sessions with a gap of more than an hour between them belong to separate blocks.
     total_block_duration = timedelta()
-    active_hours = sorted([h for h, d in hourly_durations.items() if d.total_seconds() > 0])
+    block_start = block_end = None
+    last_hour = None
+    for start, end, _ in sessions:
+        if end <= start:
+            continue
+        if block_start is not None and start.hour > last_hour + 1:
+            total_block_duration += block_end - block_start
+            block_start = None
+        if block_start is None:
+            block_start = start
+        block_end = end
+        last_hour = (end - timedelta(microseconds=1)).hour
+    if block_start is not None:
+        total_block_duration += block_end - block_start
 
-    if active_hours:
-        current_block_start_hour = active_hours[0]
-        for i in range(1, len(active_hours)):
-            # If there's a gap of more than an hour, the block is broken
-            if active_hours[i] > active_hours[i-1] + 1:
-                # Process the completed block
-                block_end_hour = active_hours[i-1]
-
-                first_event_in_block = min([e['timestamp'] for e in events if e['timestamp'].hour == current_block_start_hour])
-                last_event_in_block = max([e['timestamp'] for e in events if e['timestamp'].hour == block_end_hour])
-
-                total_block_duration += last_event_in_block - first_event_in_block
-
-                # Start a new block
-                current_block_start_hour = active_hours[i]
-
-        # Process the final block
-        last_block_end_hour = active_hours[-1]
-        first_event_in_block = min([e['timestamp'] for e in events if e['timestamp'].hour == current_block_start_hour])
-        last_event_in_block = max([e['timestamp'] for e in events if e['timestamp'].hour == last_block_end_hour])
-        total_block_duration += last_event_in_block - first_event_in_block
-
-    return hourly_durations, total_block_duration, unlock_time
+    end_state = {'unlocked': unlocked, 'display_on': display_on, 'asleep': asleep, 'tzinfo': last_tzinfo}
+    return hourly_durations, total_block_duration, active_start, end_state
 
 
 def fetch_period_data(start_date, end_date, verbose=False, no_cache=False, spinner=None, conn=None, local_tz=None):
@@ -431,8 +537,7 @@ def fetch_period_data(start_date, end_date, verbose=False, no_cache=False, spinn
     dates_to_process = [start_date + timedelta(days=i) for i in range(num_days)]
 
     # Track whether the previous processed day ended unlocked (carry-over)
-    carry_over_unlocked = False
-    carry_over_tzinfo = None
+    carry_state = None
 
     for current_day in dates_to_process:
         if spinner:
@@ -452,44 +557,15 @@ def fetch_period_data(start_date, end_date, verbose=False, no_cache=False, spinn
             if spinner:
                 spinner.text = f"Fetching logs for {current_day.isoformat()}..."
 
-            start_of_day = datetime.combine(current_day, datetime.min.time())
-            end_of_day = datetime.combine(current_day, datetime.max.time())
-            start_of_day_aware = start_of_day.replace(tzinfo=local_tz)
-            end_of_day_aware = end_of_day.replace(tzinfo=local_tz)
-
             if verbose:
                 print(f"\nFetching logs for {current_day.isoformat()}...")
 
-            predicate = 'process == "loginwindow" and eventMessage contains "com.apple.sessionagent.screenIs"'
-            command = [
-                'log', 'show', '--style', 'json',
-                '--predicate', predicate,
-                '--start', start_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z'),
-                '--end', end_of_day_aware.strftime('%Y-%m-%d %H:%M:%S%z')
-            ]
-
             try:
-                result = subprocess.run(command, capture_output=True, text=True, check=True)
-                fetched_logs = json.loads(result.stdout)
-
-                # Filter logs to only include entries from the requested date.
-                # macOS log show may return logs from other dates when requested range has no data.
-                filtered_logs = []
-                for entry in fetched_logs:
-                    ts = entry.get("timestamp", "")
-                    if ts:
-                        # Timestamp format: "2026-01-14 09:32:25.629835+0100"
-                        log_date_str = ts[:10]  # Extract "YYYY-MM-DD"
-                        if log_date_str == current_day.isoformat():
-                            filtered_logs.append(entry)
-
-                logs.extend(filtered_logs)
+                fetched_logs = fetch_day_logs(current_day, local_tz)
+                logs.extend(fetched_logs)
 
                 if verbose:
-                    if len(fetched_logs) != len(filtered_logs):
-                        print(f"Found {len(fetched_logs)} log entries, {len(filtered_logs)} match the requested date.")
-                    else:
-                        print(f"Found {len(logs)} log entries.")
+                    print(f"Found {len(logs)} log entries.")
 
                 # Cache the newly fetched logs
                 db_cache_logs(conn, current_day, logs)
@@ -497,84 +573,52 @@ def fetch_period_data(start_date, end_date, verbose=False, no_cache=False, spinn
                     db_mark_day_as_cached(conn, current_day)
 
             except subprocess.CalledProcessError as e:
-                if e.returncode == 1 and not e.stdout and not e.stderr:
-                    pass  # No logs found
-                else:
-                    if spinner:
-                        spinner.fail(f"Error executing log command for {current_day.isoformat()}")
-                    print(f"Error executing log command for {current_day.isoformat()}: {e}")
+                if spinner:
+                    spinner.fail(f"Error executing log command for {current_day.isoformat()}")
+                print(f"Error executing log command for {current_day.isoformat()}: {e}")
             except json.JSONDecodeError:
                 if spinner:
                     spinner.fail(f"Error decoding JSON from log output for {current_day.isoformat()}")
                 print(f"Error decoding JSON from log output for {current_day.isoformat()}.")
 
         if not logs:
-            carry_over_unlocked = False
+            carry_state = None
             continue
 
-        # Inject a synthetic unlocked event at 00:00 only if previous day carried over unlocked
-        if carry_over_unlocked:
+        # Re-create the previous day's end state at 00:00 if it ended unlocked
+        if carry_state:
             start_of_day = datetime.combine(current_day, datetime.min.time())
-            tzinfo = carry_over_tzinfo or local_tz
-            start_of_day = start_of_day.replace(tzinfo=tzinfo)
-            logs.append({
-                "timestamp": start_of_day.isoformat(),
-                "eventMessage": "screenIsUnlocked (synthetic carryover)"
-            })
+            start_of_day = start_of_day.replace(tzinfo=carry_state['tzinfo'] or local_tz)
+            synthetic = ["screenIsUnlocked (synthetic carryover)"]
+            if not carry_state['display_on']:
+                synthetic.append("Display status changed: 0 (synthetic carryover)")
+            if carry_state['asleep']:
+                synthetic.append("Entering Sleep state (synthetic carryover)")
+            for message in synthetic:
+                logs.append({"timestamp": start_of_day.isoformat(), "eventMessage": message})
 
-        hourly_durations, block_duration, last_unlock_time = process_day_logs(logs, current_day, verbose)
+        hourly_durations, block_duration, active_start, end_state = process_day_logs(logs, current_day, verbose)
 
-        # If the last event of the day was an unlock, it's an open session
-        if last_unlock_time is not None:
+        # If the day ended with an active session, it is still open
+        if active_start is not None:
             # If it's today, calculate up to now
             if current_day == today:
                 now = datetime.now(local_tz)
-                if last_unlock_time.date() == today:
-                    duration = now - last_unlock_time
+                if active_start.date() == today:
                     if verbose:
-                        print(f"  - Active session: from {last_unlock_time.strftime('%H:%M:%S')} to now (Duration: {duration})")
-
-                    current_time = last_unlock_time
-                    while current_time < now:
-                        current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
-                        next_hour_start = current_hour_start + timedelta(hours=1)
-
-                        segment_end = min(now, next_hour_start)
-                        duration_in_hour = segment_end - current_time
-
-                        hourly_durations[current_time.hour] += duration_in_hour
-
-                        current_time = next_hour_start
-
-                    block_duration += now - last_unlock_time
+                        print(f"  - Active session: from {active_start.strftime('%H:%M:%S')} to now (Duration: {now - active_start})")
+                    add_session_hours(hourly_durations, active_start, now)
+                    block_duration += now - active_start
             # If it's a past day, calculate up to midnight
             else:
-                end_of_day = datetime.combine(current_day, time(23, 59, 59, 999999), tzinfo=last_unlock_time.tzinfo)
-                duration = end_of_day - last_unlock_time
+                end_of_day = datetime.combine(current_day, time(23, 59, 59, 999999), tzinfo=active_start.tzinfo)
                 if verbose:
-                    print(f"  - Session carried over to next day: from {last_unlock_time.strftime('%H:%M:%S')} to 23:59:59 (Duration: {duration})")
-
-                current_time = last_unlock_time
-                while current_time < end_of_day:
-                    current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
-                    next_hour_start = current_hour_start + timedelta(hours=1)
-
-                    segment_end = min(end_of_day, next_hour_start)
-                    duration_in_hour = segment_end - current_time
-
-                    hourly_durations[current_time.hour] += duration_in_hour
-
-                    current_time = next_hour_start
-
-                block_duration += end_of_day - last_unlock_time
+                    print(f"  - Session carried over to next day: from {active_start.strftime('%H:%M:%S')} to 23:59:59 (Duration: {end_of_day - active_start})")
+                add_session_hours(hourly_durations, active_start, end_of_day)
+                block_duration += end_of_day - active_start
 
         # Update carry-over state for the next day
-        if last_unlock_time is not None:
-            carry_over_unlocked = True
-            carry_over_tzinfo = last_unlock_time.tzinfo
-        else:
-            carry_over_unlocked = False
-            carry_over_tzinfo = None
+        carry_state = end_state if end_state['unlocked'] else None
 
         if any(duration.total_seconds() > 0 for duration in hourly_durations.values()):
             daily_hourly_durations[current_day] = hourly_durations
@@ -834,11 +878,181 @@ def get_screen_time(days_back, verbose=False, no_cache=False, include_weekends=F
         print(f"Block Time: {summary['total_block_hours']:>6.1f} h  vs  {compare_summary['total_block_hours']:>6.1f} h  {block_trend}")
 
 
+# --- Background collection ---
+def collect_logs(lookback_minutes=DEFAULT_COLLECT_INTERVAL_MIN):
+    """
+    Headless collection of raw log events into the database.
+    Collects exactly the window since the last successful collection (or the last
+    `lookback_minutes` on the first run) and returns a one-line summary.
+    """
+    from tzlocal import get_localzone
+
+    conn = db_connect()
+    db_init(conn)
+    local_tz = get_localzone()
+    now = datetime.now()
+
+    last_end = db_get_meta(conn, "collect_end")
+    if last_end:
+        # Small overlap covers log entries that were committed late; duplicates are ignored on insert
+        start = datetime.fromisoformat(last_end) - timedelta(seconds=COLLECT_OVERLAP_SECONDS)
+    else:
+        start = now - timedelta(minutes=lookback_minutes)
+
+    try:
+        logs = fetch_log_range(start, now, local_tz)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError) as e:
+        conn.close()
+        return f"{now.astimezone().isoformat(timespec='seconds')} collection failed: {e}"
+
+    by_day = defaultdict(list)
+    for entry in logs:
+        by_day[entry["timestamp"][:10]].append(entry)
+    for day, entries in by_day.items():
+        db_cache_logs(conn, date.fromisoformat(day), entries)
+
+    # Collection is contiguous from collect_start, so fully covered past days need no log fetch later
+    if not last_end:
+        db_set_meta(conn, "collect_start", start.isoformat())
+    covered_from = datetime.fromisoformat(db_get_meta(conn, "collect_start"))
+    day = covered_from.date() if covered_from.time() == time(0, 0) else covered_from.date() + timedelta(days=1)
+    while day < now.date():
+        db_mark_day_as_cached(conn, day)
+        day += timedelta(days=1)
+
+    db_set_meta(conn, "collect_end", now.isoformat())
+    db_set_meta(conn, "last_collect", now.astimezone().isoformat(timespec="seconds"))
+    conn.close()
+    return (f"{now.astimezone().isoformat(timespec='seconds')} collected {len(logs)} event(s) "
+            f"from {start.strftime('%Y-%m-%d %H:%M:%S')}")
+
+
+def daemon_program_arguments():
+    """Command line launchd should run: the frozen binary, the installed entry point, or this script."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "collect"]
+    entry = os.path.abspath(sys.argv[0])
+    if os.path.basename(entry) == "time-buddy" and os.access(entry, os.X_OK):
+        return [entry, "collect"]
+    return [sys.executable, os.path.abspath(__file__), "collect"]
+
+
+def launchctl(*args):
+    return subprocess.run(["launchctl", *args], capture_output=True, text=True)
+
+
+def daemon_install(interval_minutes):
+    os.makedirs(os.path.dirname(DAEMON_PLIST), exist_ok=True)
+    os.makedirs(DAEMON_LOG_DIR, exist_ok=True)
+    arguments = daemon_program_arguments()
+    arguments += ["--lookback", str(interval_minutes)]
+
+    plist = {
+        "Label": DAEMON_LABEL,
+        "ProgramArguments": arguments,
+        "RunAtLoad": True,
+        "StartInterval": interval_minutes * 60,
+        "ProcessType": "Background",
+        "LowPriorityIO": True,
+        "Nice": 10,
+        "StandardOutPath": DAEMON_LOG,
+        "StandardErrorPath": DAEMON_LOG,
+    }
+    with open(DAEMON_PLIST, "wb") as f:
+        plistlib.dump(plist, f)
+
+    domain = f"gui/{os.getuid()}"
+    launchctl("bootout", f"{domain}/{DAEMON_LABEL}")  # Reload if already installed
+    # bootout is asynchronous, so an immediate bootstrap can fail with "Input/output error"
+    for _ in range(10):
+        result = launchctl("bootstrap", domain, DAEMON_PLIST)
+        if result.returncode == 0:
+            break
+        sleep(0.5)
+    if result.returncode != 0:
+        print(f"Failed to load the agent: {result.stderr.strip()}", file=sys.stderr)
+        return 1
+
+    print(f"Installed {DAEMON_LABEL}")
+    print(f"  Runs:    {' '.join(arguments)}")
+    print(f"  Every:   {interval_minutes} min (and at login)")
+    print(f"  Log:     {DAEMON_LOG}")
+    print(f"Each run collects the window since the previous run (the first run: the last {interval_minutes} min).")
+    return 0
+
+
+def daemon_uninstall():
+    launchctl("bootout", f"gui/{os.getuid()}/{DAEMON_LABEL}")
+    if os.path.exists(DAEMON_PLIST):
+        os.remove(DAEMON_PLIST)
+        print(f"Removed {DAEMON_LABEL}. Collected data is kept in {DB_FILE}.")
+    else:
+        print("Not installed.")
+    return 0
+
+
+def daemon_status():
+    installed = os.path.exists(DAEMON_PLIST)
+    result = launchctl("print", f"gui/{os.getuid()}/{DAEMON_LABEL}")
+    loaded = result.returncode == 0
+    print(f"Plist:     {DAEMON_PLIST} ({'present' if installed else 'missing'})")
+    print(f"Loaded:    {'yes' if loaded else 'no'}")
+    if loaded:
+        for label, pattern in (("State", r"\bstate = (.+)"), ("Last exit", r"last exit code = (\S+)"), ("Runs", r"\bruns = (\d+)")):
+            match = re.search(pattern, result.stdout)
+            if match:
+                print(f"{label + ':':<11}{match.group(1)}")
+
+    conn = db_connect()
+    db_init(conn)
+    print(f"Database:  {DB_FILE}")
+    print(f"Last run:  {db_get_meta(conn, 'last_collect') or 'never'}")
+    cached = conn.execute("SELECT COUNT(*), MIN(day) FROM fetched_days WHERE power = 1").fetchone()
+    print(f"Days:      {cached[0]} collected" + (f" (since {cached[1]})" if cached[1] else ""))
+    conn.close()
+    print(f"Log:       {DAEMON_LOG}")
+    return 0 if installed and loaded else 1
+
+
+def run_daemon_command(argv):
+    """Handles `time-buddy daemon <install|uninstall|status>` and `time-buddy collect`."""
+    parser = argparse.ArgumentParser(prog="time-buddy", description="Background collection of screen time logs.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    install = sub.add_parser("daemon", help="Manage the background collector (launchd agent).")
+    actions = install.add_subparsers(dest="action", required=True)
+    install_cmd = actions.add_parser("install", help="Install and start the launchd agent.")
+    install_cmd.add_argument("--interval", type=int, default=DEFAULT_COLLECT_INTERVAL_MIN, metavar="MINUTES",
+                             help=f"Collection interval in minutes. (default: {DEFAULT_COLLECT_INTERVAL_MIN})")
+    actions.add_parser("uninstall", help="Stop and remove the launchd agent (keeps collected data).")
+    actions.add_parser("status", help="Show agent and collection status.")
+
+    collect = sub.add_parser("collect", help="Collect logs into the database once (used by the agent).")
+    collect.add_argument("--lookback", type=int, default=DEFAULT_COLLECT_INTERVAL_MIN, metavar="MINUTES",
+                         help=f"Minutes to collect on the first run. (default: {DEFAULT_COLLECT_INTERVAL_MIN})")
+
+    args = parser.parse_args(argv)
+    if args.command == "collect":
+        print(collect_logs(args.lookback))
+        return 0
+    if args.action == "install":
+        return daemon_install(args.interval)
+    if args.action == "uninstall":
+        return daemon_uninstall()
+    return daemon_status()
+
+
 def main():
     """
     Main function to run the CLI.
     """
-    parser = argparse.ArgumentParser(description="A simple to use time tracking CLI for macOS.")
+    if len(sys.argv) > 1 and sys.argv[1] in ("daemon", "collect"):
+        sys.exit(run_daemon_command(sys.argv[1:]))
+
+    parser = argparse.ArgumentParser(
+        description="A simple to use time tracking CLI for macOS.",
+        epilog="Background collection: time-buddy daemon install|uninstall|status",
+    )
     parser.add_argument(
         '-V', '--version',
         action='version',

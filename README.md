@@ -15,6 +15,8 @@ Track your screen time based on macOS system logs to calculate how many hours yo
 - 🎨 Colorful terminal output with progress indicators
 - 📤 Export data to CSV or JSON for integration with other tools
 - 📄 Export data as PDF for easy sharing
+- 🕒 Background collector (launchd) so history is kept even if you don't run it daily
+- 💤 Sessions end on sleep and display-off, not just screen lock
 
 ## Requirements
 
@@ -101,6 +103,20 @@ time-buddy --days 7 --compare-offset
 time-buddy --days 7 --compare-offset 7
 ```
 
+## Background Collection
+
+macOS only keeps its logs for a limited time. Install the launchd agent to collect events continuously:
+
+```bash
+time-buddy daemon install               # twice a day + at login
+time-buddy daemon install --interval 60       # interval in minutes
+time-buddy daemon status
+time-buddy daemon uninstall             # keeps collected data
+```
+
+The agent runs `time-buddy collect` at low priority and logs to `~/Library/Logs/TimeBuddy/collect.log`.
+If you move or reinstall Time Buddy (or upgrade Python for a pip install), run `daemon install` again.
+
 ## Development
 
 ```bash
@@ -125,7 +141,7 @@ make clean
 
 ## How It Works
 
-Time Buddy reads macOS system logs for screen lock/unlock events and calculates:
+Time Buddy reads macOS system logs for screen lock/unlock, system sleep/wake and display on/off events. A session is active while the screen is unlocked, the display is on and the system is awake. It calculates:
 
 - **Raw time**: Actual screen-on time between unlock and lock events
 - **Block time**: Sum of time spans for each continuous work session (gaps >1 hour create separate blocks)
