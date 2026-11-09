@@ -40,7 +40,7 @@ DAEMON_PLIST = os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents", 
 DAEMON_LOG_DIR = os.path.join(os.path.expanduser("~"), "Library", "Logs", "TimeBuddy")
 DAEMON_LOG = os.path.join(DAEMON_LOG_DIR, "collect.log")
 COLLECT_OVERLAP_SECONDS = 60
-DEFAULT_COLLECT_INTERVAL_MIN = 720
+DEFAULT_COLLECT_INTERVAL_MIN = 240
 
 def get_db_path():
     """Returns the platform-specific path to the database file."""
