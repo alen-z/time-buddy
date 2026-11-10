@@ -164,6 +164,37 @@ def fetch_day_logs(current_day, local_tz):
     return fetch_log_range(start, end, local_tz)
 
 
+def db_covered_through(conn, day):
+    """Returns the time up to which `day` is fully cached from midnight, or None."""
+    midnight = datetime.combine(day, datetime.min.time())
+    candidates = []
+    fetched = db_get_meta(conn, f"fetched_through_{day.isoformat()}")
+    if fetched:
+        candidates.append(datetime.fromisoformat(fetched))
+    collect_start, collect_end = db_get_meta(conn, "collect_start"), db_get_meta(conn, "collect_end")
+    if collect_start and collect_end and datetime.fromisoformat(collect_start) <= midnight:
+        candidates.append(datetime.fromisoformat(collect_end))
+    covered = max(candidates, default=None)
+    return covered if covered and covered >= midnight else None
+
+
+def fetch_today_logs(conn, today, local_tz):
+    """
+    Returns all of today's log entries, fetching only what is newer than the cached coverage
+    (or the whole day when nothing usable is cached). The result is read back from the cache.
+    """
+    now = datetime.now()
+    covered = db_covered_through(conn, today)
+    if covered:
+        # Small overlap covers log entries that were committed late; duplicates are ignored on insert
+        start = covered - timedelta(seconds=COLLECT_OVERLAP_SECONDS)
+    else:
+        start = datetime.combine(today, datetime.min.time())
+    db_cache_logs(conn, today, fetch_log_range(start, now, local_tz))
+    db_set_meta(conn, f"fetched_through_{today.isoformat()}", now.isoformat())
+    return db_get_logs_for_day(conn, today)
+
+
 # --- Export Functions ---
 def build_day_record(day: date, hourly_durations: defaultdict, block_duration: timedelta, expected_hours: float):
     """Builds a dictionary record for a single day's data."""
@@ -561,16 +592,17 @@ def fetch_period_data(start_date, end_date, verbose=False, no_cache=False, spinn
                 print(f"\nFetching logs for {current_day.isoformat()}...")
 
             try:
-                fetched_logs = fetch_day_logs(current_day, local_tz)
-                logs.extend(fetched_logs)
+                if current_day == today and not no_cache:
+                    logs = fetch_today_logs(conn, today, local_tz)
+                else:
+                    logs.extend(fetch_day_logs(current_day, local_tz))
+                    # Cache the newly fetched logs
+                    db_cache_logs(conn, current_day, logs)
+                    if current_day != today:
+                        db_mark_day_as_cached(conn, current_day)
 
                 if verbose:
                     print(f"Found {len(logs)} log entries.")
-
-                # Cache the newly fetched logs
-                db_cache_logs(conn, current_day, logs)
-                if current_day != today:
-                    db_mark_day_as_cached(conn, current_day)
 
             except subprocess.CalledProcessError as e:
                 if spinner:
