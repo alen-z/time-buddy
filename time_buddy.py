@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from time import sleep
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 def get_version():
     """Returns the package version."""
